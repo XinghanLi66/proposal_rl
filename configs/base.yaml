@@ -1,0 +1,106 @@
+# ============================================================
+# proposal_rl — base configuration
+# All paths are absolute. Dataset files are derived from runs_dir.
+# ============================================================
+
+# --- Paths ---
+arxiv_root: /newcpfs/lxh/agentic-training/data/arxiv/papers
+runs_dir: /newcpfs/lxh/agentic-training/proposal_rl/runs
+
+# --- Data splits (temporal, strict) ---
+train_months: ["2025-04", "2025-05", "2025-06", "2025-07", "2025-08", "2025-09", "2025-10"]
+val_months:   ["2025-11", "2025-12"]
+test_months:  ["2026-01", "2026-02", "2026-03"]
+
+# --- Paper filtering ---
+target_categories: ["cs.LG", "cs.AI", "cs.CL", "cs.CV", "cs.IR", "cs.NE", "stat.ML"]
+min_resolved_refs: 8
+max_refs_per_paper: 40
+train_size: 50000    # max training examples (null = use all)
+
+# --- Data fetching (Semantic Scholar API) ---
+fetch:
+  rps: 0.7           # requests/sec (conservative to avoid 429s)
+  workers: 2         # concurrent async workers
+
+# --- CoT synthesis (Claude API) ---
+cot:
+  model: "claude-sonnet-4-6"
+  max_tokens: 2048
+  temperature: 0.8
+  concurrency: 8
+
+# --- Model ---
+model_name_or_path: "/newcpfs/lxh/agentic-training/proposal_rl/runs/model_cache/models--Qwen--Qwen2.5-7B-Instruct/snapshots/a09a35458c702b33eeacc393d103063234e8bc28"
+model_cache_dir: /newcpfs/lxh/agentic-training/proposal_rl/runs/model_cache
+
+# --- Conditioning prompt strategy ---
+prompt_builder:
+  strategy: full_refs    # full_refs | top_k_refs | related_work | with_research_question
+  max_refs: 40
+  shuffle_seed: 42
+  # LLM-based strategy options (top_k_refs, related_work, with_research_question):
+  model: "claude-sonnet-4-6"
+  top_k: 5               # for top_k_refs: number of refs to select
+
+# --- SFT ---
+sft:
+  finetune_mode: lora    # lora | full
+  num_train_epochs: 2
+  per_device_train_batch_size: 2
+  gradient_accumulation_steps: 8
+  learning_rate: 2.0e-4
+  lr_scheduler_type: cosine
+  warmup_ratio: 0.05
+  max_seq_length: 8192
+  logging_steps: 10
+  save_steps: 200
+  bf16: true
+  dataloader_num_workers: 4
+  lora_r: 64
+  lora_alpha: 128
+  lora_target_modules: ["q_proj", "k_proj", "v_proj", "o_proj", "gate_proj", "up_proj", "down_proj"]
+  lora_dropout: 0.05
+  deepspeed_config: configs/ds_zero2.json
+
+# --- RL (GRPO / RLOO) ---
+# GRPO uses PPO-clip objective (epsilon=0.2) with group-normalized advantages (no value net).
+# RLOO uses REINFORCE Leave-One-Out — simpler, no clipping.
+rl:
+  algo: grpo             # grpo | rloo
+  finetune_mode: lora    # lora | full
+  sft_checkpoint: ""     # leave empty to use runs/sft/final
+  num_train_epochs: 1
+  per_device_train_batch_size: 1
+  gradient_accumulation_steps: 4
+  learning_rate: 5.0e-6
+  lr_scheduler_type: cosine
+  warmup_ratio: 0.05
+  max_completion_length: 2048
+  num_generations: 8     # GRPO: group size
+  rloo_k: 4              # RLOO: leave-one-out group size
+  kl_coeff: 0.05
+  logging_steps: 5
+  save_steps: 100
+  bf16: true
+  reward_type: prs             # prs | fas
+  reward_prs_weight: 0.8       # used when reward_type: prs
+  reward_format_weight: 0.2
+  # FAS-specific (used when reward_type: fas):
+  reward_fas_weight: 0.6
+  reward_antileak_weight: 0.2
+  reward_antileak_threshold: 0.80
+  lora_r: 64
+  lora_alpha: 128
+  lora_target_modules: ["q_proj", "k_proj", "v_proj", "o_proj", "gate_proj", "up_proj", "down_proj"]
+  lora_dropout: 0.05
+  deepspeed_config: configs/ds_zero2.json
+
+# --- FAS evaluation ---
+fas:
+  strategy: embedding     # embedding | llm_judge
+  topk: 50               # recall@K and top-K for cosine similarity
+  embed_model: "sentence-transformers/all-MiniLM-L6-v2"
+  # llm_judge options (aligns with arXiv:2603.27146):
+  judge_model: "claude-sonnet-4-6"
+  judge_topk: 10          # retrieve top-K papers, score each, take MAX

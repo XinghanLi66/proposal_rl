@@ -1,0 +1,73 @@
+# ── Python ────────────────────────────────────────────────────────────────────
+__pycache__/
+*.py[cod]
+*.pyo
+.Python
+*.egg-info/
+dist/
+build/
+.eggs/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# ── Editor / OS ───────────────────────────────────────────────────────────────
+.DS_Store
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+.cursor/
+
+# ── Logs — all of them ────────────────────────────────────────────────────────
+*.log
+logs/
+
+# ── Model weights & checkpoints ───────────────────────────────────────────────
+*.safetensors
+*.bin
+*.pt
+*.pth
+*.ckpt
+checkpoint-*/
+final/
+model_cache/
+
+# ── Dataset & generated data files ───────────────────────────────────────────
+*.jsonl
+*.npz
+*.npy
+*.parquet
+*.arrow
+*.csv
+
+# ── Experiment runs (checkpoints, evals, hparam results, config snapshots) ───
+runs/dataset/
+runs/model_cache/
+runs/sft/
+runs/grpo/
+runs/rl/
+runs/eval/
+runs/exps/
+runs/logs/
+
+# Keep the small pipeline orchestration scripts in runs/
+!runs/_pipeline.sh
+!runs/_resume.sh
+!runs/model_path.txt
+
+# ── Conda / pip envs ──────────────────────────────────────────────────────────
+.env
+.venv
+env/
+venv/
+*.egg
+
+# ── Jupyter ───────────────────────────────────────────────────────────────────
+.ipynb_checkpoints/
+*.ipynb
+
+# ── Misc generated ────────────────────────────────────────────────────────────
+.best_hparams
+hparam_search.json
