@@ -24,11 +24,13 @@ _REPO_ROOT = str(Path(__file__).resolve().parent.parent)
 if _REPO_ROOT not in sys.path:
     sys.path.insert(0, _REPO_ROOT)
 
-import numpy as np
 import torch
 import yaml
 from peft import PeftModel
 from transformers import AutoModelForCausalLM, AutoTokenizer
+
+import numpy as np
+from sentence_transformers import SentenceTransformer
 
 from eval.fas import extract_proposal_text, get_fas_evaluator, load_index
 
@@ -55,6 +57,19 @@ def word_cosine(a: str, b: str) -> float:
     na = sum(x**2 for x in va.values())**0.5
     nb = sum(x**2 for x in vb.values())**0.5
     return dot / (na * nb) if na > 0 and nb > 0 else 0.0
+
+
+def compute_prs(proposal_texts: list[str], abstracts: list[str], encoder: SentenceTransformer) -> list[float]:
+    """Paper Recovery Score: cosine sim between proposal embedding and source abstract embedding."""
+    all_embs = encoder.encode(
+        proposal_texts + abstracts,
+        batch_size=64,
+        normalize_embeddings=True,
+        convert_to_numpy=True,
+    ).astype(np.float32)
+    prop_embs = all_embs[:len(proposal_texts)]
+    abst_embs = all_embs[len(proposal_texts):]
+    return (prop_embs * abst_embs).sum(axis=1).tolist()
 
 
 def generate_proposals(model, tokenizer, records, batch_size, max_new_tokens, device) -> list[str]:
@@ -147,52 +162,61 @@ def main():
     gen_time = time.time() - t0
     log.info(f"Generation done in {gen_time:.0f}s")
 
+    proposal_texts = [extract_proposal_text(p) for p in proposals]
+    arxiv_ids      = [r["arxiv_id"] for r in records]
+    abstracts      = [r.get("abstract", "") for r in records]
+
     # FAS evaluation
     index_file = runs_dir / "eval" / f"{args.split}_index.npz"
     index = load_index(index_file)
     evaluator = get_fas_evaluator(cfg)
     log.info(f"FAS evaluator: {type(evaluator).__name__}")
-
-    proposal_texts = [extract_proposal_text(p) for p in proposals]
-    arxiv_ids = [r["arxiv_id"] for r in records]
-
     if type(evaluator).__name__ == "LLMJudgeFAS":
-        log.warning(f"LLMJudgeFAS: scoring {len(records)} proposals × {evaluator.judge_topk} judge calls — this is slow")
+        log.warning(f"LLMJudgeFAS: {len(records)} × {evaluator.judge_topk} judge calls — slow")
     fas_results = evaluator.score_batch(proposal_texts, arxiv_ids, index)
+
+    # PRS — reuse the encoder already inside the FAS evaluator when possible
+    log.info("Computing PRS...")
+    encoder = getattr(evaluator, "encoder", None) or SentenceTransformer(
+        cfg.get("fas", {}).get("embed_model", "sentence-transformers/all-MiniLM-L6-v2")
+    )
+    prs_scores = compute_prs(proposal_texts, abstracts, encoder)
 
     # Per-example metrics
     results = []
     format_scores, leakage_scores = [], []
     for i, rec in enumerate(records):
-        fmt = format_score(proposals[i])
-        leak = word_cosine(proposal_texts[i], rec.get("abstract", ""))
+        fmt  = format_score(proposals[i])
+        leak = word_cosine(proposal_texts[i], abstracts[i])
         format_scores.append(fmt)
         leakage_scores.append(leak)
         results.append({
             "arxiv_id": rec["arxiv_id"],
             **fas_results[i],
+            "PRS": round(prs_scores[i], 4),
             "format_score": fmt,
             "leakage_score": round(leak, 4),
             "proposal": proposals[i],
         })
 
-    fas_values = [r["FAS"] for r in fas_results]
-    recall_values = [r["recall_at_k"] for r in fas_results]
+    fas_values      = [r["FAS"] for r in fas_results]
+    recall_values   = [r["recall_at_k"] for r in fas_results]
     mean_sim_values = [r.get("mean_sim", r.get("max_judge_score", 0.0)) for r in fas_results]
 
     summary = {
-        "checkpoint": str(args.checkpoint),
-        "split": args.split,
-        "fas_strategy": cfg.get("fas", {}).get("strategy", "embedding"),
-        "n_examples": len(records),
-        "topk": fas_results[0]["topk"] if fas_results else 0,
-        "FAS": round(float(np.mean(fas_values)), 4),
-        "recall_at_k": round(float(np.mean(recall_values)), 4),
-        "mean_similarity": round(float(np.mean(mean_sim_values)), 4),
-        "format_score": round(float(np.mean(format_scores)), 4),
-        "leakage_score_mean": round(float(np.mean(leakage_scores)), 4),
+        "checkpoint":          str(args.checkpoint),
+        "split":               args.split,
+        "fas_strategy":        cfg.get("fas", {}).get("strategy", "embedding"),
+        "n_examples":          len(records),
+        "topk":                fas_results[0]["topk"] if fas_results else 0,
+        "FAS":                 round(float(np.mean(fas_values)), 4),
+        "recall_at_k":         round(float(np.mean(recall_values)), 4),
+        "mean_similarity":     round(float(np.mean(mean_sim_values)), 4),
+        "PRS":                 round(float(np.mean(prs_scores)), 4),
+        "format_score":        round(float(np.mean(format_scores)), 4),
+        "leakage_score_mean":  round(float(np.mean(leakage_scores)), 4),
         "leakage_flagged_pct": round(float(np.mean([s > 0.85 for s in leakage_scores])), 4),
-        "gen_time_s": round(gen_time, 1),
+        "gen_time_s":          round(gen_time, 1),
     }
 
     out_dir = Path(args.output_dir) if args.output_dir else Path(args.checkpoint) / "eval_results"
@@ -204,10 +228,11 @@ def main():
 
     log.info(f"\n{'='*50}")
     log.info(f"FAS ({summary['fas_strategy']}): {summary['FAS']:.4f}")
-    log.info(f"Recall@{summary['topk']}:  {summary['recall_at_k']:.4f}")
-    log.info(f"Mean sim:       {summary['mean_similarity']:.4f}")
-    log.info(f"Format score:   {summary['format_score']:.4f}")
-    log.info(f"Leakage mean:   {summary['leakage_score_mean']:.4f}")
+    log.info(f"Recall@{summary['topk']}:        {summary['recall_at_k']:.4f}")
+    log.info(f"Mean sim:                        {summary['mean_similarity']:.4f}")
+    log.info(f"PRS:                             {summary['PRS']:.4f}")
+    log.info(f"Format score:                    {summary['format_score']:.4f}")
+    log.info(f"Leakage mean:                    {summary['leakage_score_mean']:.4f}")
     log.info(f"Results saved → {out_dir}")
 
 
