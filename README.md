@@ -65,13 +65,25 @@ bash scripts/03_synthesize_cot.sh    # synthesize CoT proposals with Claude
 bash scripts/04_build_index.sh       # build val-set embedding index for FAS eval
 ```
 
-Data splits use arXiv papers from cs.LG / cs.AI / cs.CL / cs.CV / cs.IR / cs.NE / stat.ML:
+Data splits use arXiv papers from cs.LG / cs.AI / cs.CL / cs.CV / cs.IR / cs.NE / stat.ML, divided **temporally** (strictly no future leakage):
 
-| Split | Months |
-|-------|--------|
-| Train | 2025-04 → 2025-10 |
-| Val   | 2025-11 → 2025-12 |
-| Test  | 2026-01 → 2026-03 |
+| Split | Months | Papers | Role |
+|-------|--------|--------|------|
+| Train | 2025-04 → 2025-10 | ~7 k | SFT and RL training |
+| Val   | 2025-11 → 2025-12 | ~2 k | FAS retrieval corpus during RL; intermediate eval |
+| Test  | 2026-01 → 2026-03 | ~3 k | Final held-out evaluation only |
+
+**How each split is used across the pipeline:**
+
+| Stage | Dataset file | Index file | Notes |
+|-------|-------------|------------|-------|
+| SFT | `train_cot.jsonl` | — | CoT proposals synthesized from train papers |
+| RL (PRS reward) | `train.jsonl` | — | PRS = cosine sim vs. the paper's own abstract; no index needed |
+| RL (FAS reward) | `train.jsonl` | `val_index.npz` | Val abstracts form the retrieval corpus; train papers are never in the index |
+| Offline eval | `test.jsonl` | `test_index.npz` | Fully held-out; run once per checkpoint |
+| Checkpoint selection | `val.jsonl` | `val_index.npz` | Optional; use `--split val` in `eval/evaluate.py` |
+
+> **Note for FAS-trained models (exp07/08):** the val split is used as the *retrieval target* during training, so the model is implicitly optimised toward val-paper directions. Val-split eval scores for these models are therefore optimistic — use test-split scores for fair comparison.
 
 ### 4. SFT
 
