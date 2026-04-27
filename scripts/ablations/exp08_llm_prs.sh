@@ -45,3 +45,5 @@ register_dashboard
 start_dashboard_refresh
 run_hparam_search
 run_full_training
+
+finish_experiment

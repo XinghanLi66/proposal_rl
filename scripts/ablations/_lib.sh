@@ -208,9 +208,9 @@ run_full_training() {
         --nproc_per_node "$NGPU" \
         --master_port "$full_port" \
         train/rl.py --config "$full_cfg" \
-        2>&1 | tee "$log"
-
-    echo "[${EXP_NAME}] Training done → ${EXP_DIR}/rl/final"
+        2>&1 | tee "$log" \
+        && echo "[${EXP_NAME}] Training done → ${EXP_DIR}/rl/final" \
+        || echo "[${EXP_NAME}] ERROR: full training exited non-zero — check $log"
 }
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -228,4 +228,27 @@ start_dashboard_refresh() {
     _REFRESH_PID=$!
     # Kill the background loop when the script exits
     trap 'kill "$_REFRESH_PID" 2>/dev/null || true' EXIT
+}
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Call at the very end of every exp script.
+# Prints a status banner and then drops the tmux/shell to an interactive prompt
+# so the session stays alive for debugging even if the experiment crashed.
+# ─────────────────────────────────────────────────────────────────────────────
+finish_experiment() {
+    if [[ -d "${EXP_DIR}/rl/final" ]]; then
+        echo ""
+        echo "╔══════════════════════════════════════════════════════╗"
+        echo "║  [${EXP_NAME}] FINISHED SUCCESSFULLY                "
+        echo "║  Output → ${EXP_DIR}/rl/final                       "
+        echo "╚══════════════════════════════════════════════════════╝"
+    else
+        echo ""
+        echo "╔══════════════════════════════════════════════════════╗"
+        echo "║  [${EXP_NAME}] EXITED (check logs for errors)       "
+        echo "║  Log dir → ${EXP_LOG_DIR}                           "
+        echo "╚══════════════════════════════════════════════════════╝"
+    fi
+    # Drop to an interactive shell so the tmux session stays open for debugging
+    exec bash
 }
