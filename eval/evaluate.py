@@ -1,13 +1,18 @@
 #!/usr/bin/env python3
 """
-Compute Future Alignment Score (FAS) for a trained model checkpoint.
+Evaluate a checkpoint or a Claude API baseline on FAS + PRS metrics.
+
+Generation modes (mutually exclusive):
+  --checkpoint PATH   load a local HF checkpoint (LoRA or full)
+  --claude-model ID   call the Claude API (e.g. claude-sonnet-4-6)
 
 FAS strategy is controlled by cfg['fas']['strategy']:
   embedding  — fast cosine similarity (default)
   llm_judge  — Claude-scored alignment (slow, aligns with arXiv:2603.27146)
 
-Also computes format score and anti-leakage score.
-Saves a summary JSON and per-example results to the checkpoint directory.
+Also computes PRS, format score and anti-leakage score.
+Saves summary.json + per_example.jsonl to the checkpoint directory, or
+runs/eval/baselines/<model>/ for Claude baselines.
 """
 
 from __future__ import annotations
@@ -18,6 +23,7 @@ import logging
 import re
 import sys
 import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
 _REPO_ROOT = str(Path(__file__).resolve().parent.parent)
@@ -103,45 +109,85 @@ def generate_proposals(model, tokenizer, records, batch_size, max_new_tokens, de
     return proposals
 
 
+_PROXY_URL = "http://10.39.10.241:10001"
+
+
+def _call_claude_one(record: dict, model: str, max_new_tokens: int) -> str:
+    """Call Claude API for one record. Returns raw response text."""
+    import httpx
+    messages = [{"role": "user", "content": record["prompt"]}]
+    try:
+        resp = httpx.post(
+            f"{_PROXY_URL}/v1/messages",
+            headers={
+                "x-api-key": "123",
+                "anthropic-version": "2023-06-01",
+                "content-type": "application/json",
+            },
+            json={
+                "model": model,
+                "max_tokens": max_new_tokens,
+                "system": record["system"],
+                "messages": messages,
+            },
+            timeout=300.0,
+        )
+        resp.raise_for_status()
+        data = json.loads(resp.content.decode("utf-8", errors="replace"))
+        return data["content"][0]["text"]
+    except Exception as e:
+        log.warning(f"Claude API call failed for {record.get('arxiv_id')}: {e}")
+        return ""
+
+
+def generate_proposals_claude(
+    records: list[dict], model: str, max_new_tokens: int, workers: int = 16
+) -> list[str]:
+    """Generate proposals for all records via Claude API using a thread pool."""
+    proposals = [""] * len(records)
+    idx_map = {id(r): i for i, r in enumerate(records)}
+
+    with ThreadPoolExecutor(max_workers=workers) as pool:
+        futures = {pool.submit(_call_claude_one, rec, model, max_new_tokens): rec
+                   for rec in records}
+        done = 0
+        for fut in as_completed(futures):
+            rec = futures[fut]
+            proposals[idx_map[id(rec)]] = fut.result()
+            done += 1
+            if done % 20 == 0 or done == len(records):
+                log.info(f"Generated {done}/{len(records)}")
+    return proposals
+
+
 def main():
-    parser = argparse.ArgumentParser(description=__doc__)
+    parser = argparse.ArgumentParser(description=__doc__,
+                                     formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--config", default="configs/base.yaml")
-    parser.add_argument("--checkpoint", required=True)
-    parser.add_argument("--base-model", help="Base model path for LoRA checkpoints")
     parser.add_argument("--split", default="test", choices=["val", "test"])
     parser.add_argument("--limit", type=int, default=500)
-    parser.add_argument("--batch-size", type=int, default=4)
     parser.add_argument("--max-new-tokens", type=int, default=1024)
     parser.add_argument("--topk", type=int, default=None, help="Override fas.topk from config")
     parser.add_argument("--output-dir", help="Override output directory")
+
+    mode = parser.add_mutually_exclusive_group(required=True)
+    mode.add_argument("--checkpoint", help="Path to local HF checkpoint (LoRA or full)")
+    mode.add_argument("--claude-model", metavar="MODEL_ID",
+                      help="Claude model ID to use as baseline (e.g. claude-sonnet-4-6)")
+
+    parser.add_argument("--base-model", help="Base model path for LoRA checkpoints")
+    parser.add_argument("--batch-size", type=int, default=4,
+                        help="Batch size for local checkpoint generation (ignored for Claude)")
+    parser.add_argument("--workers", type=int, default=16,
+                        help="Parallel API workers for --claude-model")
     args = parser.parse_args()
 
     with open(args.config) as f:
         cfg = yaml.safe_load(f)
     runs_dir = Path(cfg["runs_dir"])
 
-    # Allow --topk to override config
     if args.topk:
         cfg.setdefault("fas", {})["topk"] = args.topk
-
-    # Load model
-    device = "cuda" if torch.cuda.is_available() else "cpu"
-    base_path = args.base_model or cfg.get("model_name_or_path")
-    tokenizer = AutoTokenizer.from_pretrained(base_path or args.checkpoint, trust_remote_code=True)
-    tokenizer.padding_side = "left"
-
-    try:
-        base_model = AutoModelForCausalLM.from_pretrained(
-            base_path, torch_dtype=torch.bfloat16, device_map="auto", trust_remote_code=True
-        )
-        model = PeftModel.from_pretrained(base_model, args.checkpoint).merge_and_unload()
-        log.info("Loaded LoRA checkpoint")
-    except Exception:
-        model = AutoModelForCausalLM.from_pretrained(
-            args.checkpoint, torch_dtype=torch.bfloat16, device_map="auto", trust_remote_code=True
-        )
-        log.info("Loaded full model checkpoint")
-    model.eval()
 
     # Load dataset
     dataset_file = runs_dir / "dataset" / f"{args.split}.jsonl"
@@ -158,7 +204,30 @@ def main():
 
     # Generate proposals
     t0 = time.time()
-    proposals = generate_proposals(model, tokenizer, records, args.batch_size, args.max_new_tokens, device)
+    if args.claude_model:
+        log.info(f"Generating via Claude API: {args.claude_model}  workers={args.workers}")
+        proposals = generate_proposals_claude(records, args.claude_model, args.max_new_tokens, args.workers)
+        source_label = args.claude_model
+    else:
+        device = "cuda" if torch.cuda.is_available() else "cpu"
+        base_path = args.base_model or cfg.get("model_name_or_path")
+        tokenizer = AutoTokenizer.from_pretrained(base_path or args.checkpoint, trust_remote_code=True)
+        tokenizer.padding_side = "left"
+        try:
+            base_model = AutoModelForCausalLM.from_pretrained(
+                base_path, torch_dtype=torch.bfloat16, device_map="auto", trust_remote_code=True
+            )
+            model = PeftModel.from_pretrained(base_model, args.checkpoint).merge_and_unload()
+            log.info("Loaded LoRA checkpoint")
+        except Exception:
+            model = AutoModelForCausalLM.from_pretrained(
+                args.checkpoint, torch_dtype=torch.bfloat16, device_map="auto", trust_remote_code=True
+            )
+            log.info("Loaded full model checkpoint")
+        model.eval()
+        proposals = generate_proposals(model, tokenizer, records, args.batch_size, args.max_new_tokens, device)
+        source_label = args.checkpoint
+
     gen_time = time.time() - t0
     log.info(f"Generation done in {gen_time:.0f}s")
 
@@ -204,7 +273,7 @@ def main():
     mean_sim_values = [r.get("mean_sim", r.get("max_judge_score", 0.0)) for r in fas_results]
 
     summary = {
-        "checkpoint":          str(args.checkpoint),
+        "checkpoint":          source_label,
         "split":               args.split,
         "fas_strategy":        cfg.get("fas", {}).get("strategy", "embedding"),
         "n_examples":          len(records),
@@ -219,7 +288,13 @@ def main():
         "gen_time_s":          round(gen_time, 1),
     }
 
-    out_dir = Path(args.output_dir) if args.output_dir else Path(args.checkpoint) / "eval_results"
+    if args.output_dir:
+        out_dir = Path(args.output_dir)
+    elif args.claude_model:
+        safe_name = args.claude_model.replace("/", "_")
+        out_dir = runs_dir / "eval" / "baselines" / f"{safe_name}_{args.split}"
+    else:
+        out_dir = Path(args.checkpoint) / "eval_results"
     out_dir.mkdir(parents=True, exist_ok=True)
     (out_dir / "summary.json").write_text(json.dumps(summary, indent=2))
     with open(out_dir / "per_example.jsonl", "w") as f:

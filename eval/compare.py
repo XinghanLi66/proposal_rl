@@ -25,33 +25,49 @@ HEADERS  = ["exp",        "FAS",   "recall@K", "PRS",   "fmt",   "leakage", "n",
 
 def load_summaries(runs_dir: Path, exp_prefixes: list[str]) -> list[dict]:
     rows = []
-    for summary_path in sorted(runs_dir.glob("exps/*/rl/final/eval_results/summary.json")):
-        exp_dir  = summary_path.parents[3]   # exps/EXP_ID
-        exp_id   = exp_dir.name
 
+    # Trained checkpoints: runs/exps/EXP_ID/rl/final/eval_results/summary.json
+    for summary_path in sorted(runs_dir.glob("exps/*/rl/final/eval_results/summary.json")):
+        exp_id = summary_path.parents[3].name
         if exp_prefixes and not any(exp_id.startswith(p) for p in exp_prefixes):
             continue
-
         try:
             s = json.loads(summary_path.read_text())
         except Exception:
             continue
-
-        # Short label: exp01_baseline_20260425 → "exp01_baseline"
         parts = exp_id.rsplit("_", 2)
         label = parts[0] if len(parts) == 3 else exp_id
-
         rows.append({
-            "exp":       label,
-            "FAS":       s.get("FAS"),
-            "recall@K":  s.get("recall_at_k"),
-            "PRS":       s.get("PRS"),
-            "fmt":       s.get("format_score"),
-            "leakage":   s.get("leakage_score_mean"),
-            "n":         s.get("n_examples"),
-            "strategy":  s.get("fas_strategy", "embedding"),
-            "checkpoint": str(summary_path.parents[1]),   # .../rl/final
+            "exp":      label,
+            "FAS":      s.get("FAS"),
+            "recall@K": s.get("recall_at_k"),
+            "PRS":      s.get("PRS"),
+            "fmt":      s.get("format_score"),
+            "leakage":  s.get("leakage_score_mean"),
+            "n":        s.get("n_examples"),
+            "strategy": s.get("fas_strategy", "embedding"),
         })
+
+    # Claude / API baselines: runs/eval/baselines/MODEL_SPLIT/summary.json
+    for summary_path in sorted(runs_dir.glob("eval/baselines/*/summary.json")):
+        if exp_prefixes:   # only filter baselines if explicitly named
+            pass
+        try:
+            s = json.loads(summary_path.read_text())
+        except Exception:
+            continue
+        label = summary_path.parent.name   # e.g. claude-sonnet-4-6_test
+        rows.append({
+            "exp":      label,
+            "FAS":      s.get("FAS"),
+            "recall@K": s.get("recall_at_k"),
+            "PRS":      s.get("PRS"),
+            "fmt":      s.get("format_score"),
+            "leakage":  s.get("leakage_score_mean"),
+            "n":        s.get("n_examples"),
+            "strategy": s.get("fas_strategy", "embedding"),
+        })
+
     return rows
 
 
