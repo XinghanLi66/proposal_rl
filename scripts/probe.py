@@ -26,7 +26,6 @@ from __future__ import annotations
 
 import argparse
 import json
-import random
 import re
 import sys
 import time
@@ -43,6 +42,7 @@ from peft import PeftModel
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
 from eval.fas import extract_proposal_text, get_fas_evaluator, load_index
+from train.prompt_builder import get_builder, REGISTRY as STRATEGY_REGISTRY
 
 # ── CoT synthesis (mirrors data/synthesize_cot.py exactly) ───────────────────
 
@@ -149,61 +149,6 @@ def generate_baseline(record: dict, model: str, max_tokens: int) -> tuple[str, f
     return text, time.time() - t0
 
 
-# ── Prompt construction (mirrors data/build_dataset.py exactly) ───────────────
-
-SYSTEM_PROMPT = """\
-You are a research scientist with deep expertise in machine learning and AI. \
-You will be given a list of papers (title and abstract each) that a researcher has been reading. \
-Your task is to generate a structured research proposal for a novel research direction \
-that these papers collectively suggest — as if you were the researcher proposing new work \
-inspired by this body of literature."""
-
-USER_TEMPLATE = """\
-Below are {n_refs} papers from a researcher's reading list. \
-Based on these references, propose a novel research direction.
-
-{ref_block}
-
-Generate a structured research proposal using this exact format:
-<thinking>
-[Analyze what themes, methods, and open problems span these references. \
-Identify the most compelling gap or opportunity. \
-Think step-by-step before writing the proposal.]
-</thinking>
-<proposal>
-<problem>What core research problem should be addressed?</problem>
-<gap>What gap in the existing literature motivates this work?</gap>
-<key_insight>What key insight or hypothesis drives the proposed approach?</key_insight>
-<approach>How would the proposed method work at a high level?</approach>
-<expected_contributions>What are the expected scientific contributions?</expected_contributions>
-</proposal>"""
-
-REF_ENTRY_TEMPLATE = "[{idx}] {title} ({year})\nAbstract: {abstract}"
-
-
-def build_ref_block(refs: list[dict], max_refs: int) -> str:
-    entries = []
-    for i, r in enumerate(refs[:max_refs]):
-        abstract = (r.get("abstract") or "").strip()
-        if len(abstract) > 400:
-            abstract = abstract[:400] + "..."
-        entries.append(REF_ENTRY_TEMPLATE.format(
-            idx=i + 1,
-            title=r.get("title", "Unknown"),
-            year=r.get("year") or "n.d.",
-            abstract=abstract or "(no abstract available)",
-        ))
-    return "\n\n".join(entries)
-
-
-def build_prompt_from_refs(refs: list[dict], max_refs: int) -> str:
-    rng = random.Random(42)
-    shuffled = list(refs)
-    rng.shuffle(shuffled)
-    ref_block = build_ref_block(shuffled, max_refs)
-    return USER_TEMPLATE.format(n_refs=min(len(shuffled), max_refs), ref_block=ref_block)
-
-
 # ── Record loading ─────────────────────────────────────────────────────────────
 
 def load_record_from_dataset(arxiv_id: str, runs_dir: Path) -> dict | None:
@@ -223,7 +168,7 @@ def load_record_from_dataset(arxiv_id: str, runs_dir: Path) -> dict | None:
     return None
 
 
-def load_record_from_metadata(meta_path: Path, runs_dir: Path, max_refs: int) -> dict | None:
+def load_record_from_metadata(meta_path: Path, runs_dir: Path, builder) -> dict | None:
     meta = json.loads(meta_path.read_text())
     arxiv_id = meta.get("arxiv_id")
     if not arxiv_id:
@@ -252,15 +197,15 @@ def load_record_from_metadata(meta_path: Path, runs_dir: Path, max_refs: int) ->
         print(f"WARNING: no refs found for {arxiv_id} — prompt will be empty", file=sys.stderr)
         refs = []
 
-    prompt = build_prompt_from_refs(refs, max_refs)
-    return {
+    record = {
         "arxiv_id": arxiv_id,
         "title": meta.get("title", ""),
         "abstract": meta.get("abstract", ""),
-        "system": SYSTEM_PROMPT,
-        "prompt": prompt,
         "refs": refs,
     }
+    record["system"] = builder.system()
+    record["prompt"] = builder.build(record)
+    return record
 
 
 def load_record_from_jsonl(jsonl_path: Path, index: int) -> dict | None:
@@ -363,6 +308,11 @@ def main():
     parser.add_argument("--no-fas", action="store_true", help="Skip FAS evaluation")
     parser.add_argument("--index-split", default="test", choices=["test", "val"])
     parser.add_argument("--config", default="configs/base.yaml")
+    parser.add_argument("--strategy", default=None,
+                        choices=list(STRATEGY_REGISTRY),
+                        help="Prompt-builder strategy (default: read from config, or full_refs). "
+                             "LLM-based strategies (top_k_refs, related_work, "
+                             "with_research_question, top_k_related_work) call the API.")
 
     group = parser.add_mutually_exclusive_group(required=True)
     group.add_argument("--paper", help="arxiv_id or path to metadata.json")
@@ -379,21 +329,36 @@ def main():
     with open(args.config) as f:
         cfg = yaml.safe_load(f)
     runs_dir = Path(cfg["runs_dir"])
-    max_refs = cfg.get("max_refs_per_paper", 40)
+
+    # Build prompt builder — CLI --strategy overrides config
+    pb_cfg = cfg.get("prompt_builder", {}).copy()
+    pb_cfg["runs_dir"] = str(runs_dir)
+    if args.strategy:
+        pb_cfg["strategy"] = args.strategy
+    builder = get_builder({**cfg, "prompt_builder": pb_cfg})
+    print(f"Prompt strategy: {pb_cfg.get('strategy', 'full_refs')}  [{type(builder).__name__}]")
 
     # Load record
     record = None
     if args.record:
         print(f"Loading record #{args.index} from {args.record}")
         record = load_record_from_jsonl(Path(args.record), args.index)
+        # Optionally rebuild prompt with the requested strategy (if explicitly set)
+        if args.strategy and record is not None and record.get("refs"):
+            record["system"] = builder.system()
+            record["prompt"] = builder.build(record)
     else:
         p = Path(args.paper)
         if p.exists() and p.suffix == ".json":
             print(f"Loading from metadata.json: {p}")
-            record = load_record_from_metadata(p, runs_dir, max_refs)
+            record = load_record_from_metadata(p, runs_dir, builder)
         else:
             print(f"Looking up arxiv_id={args.paper} in dataset...")
             record = load_record_from_dataset(args.paper, runs_dir)
+            # Rebuild prompt with the requested strategy if refs are available
+            if args.strategy and record is not None and record.get("refs"):
+                record["system"] = builder.system()
+                record["prompt"] = builder.build(record)
 
     if record is None:
         print("ERROR: could not load paper record.", file=sys.stderr)
