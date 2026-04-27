@@ -180,7 +180,9 @@ def main():
             rl.get("reward_format_weight", 0.2),
         ]
     elif reward_type == "fas":
+        fas_strategy = fas_cfg.get("strategy", "embedding")
         fas_index = str(runs_dir / "eval" / "val_index.npz")
+        log.info(f"FAS strategy: {fas_strategy}")
         init_reward(
             index_file=fas_index,
             embed_model=embed_model,
@@ -190,6 +192,9 @@ def main():
             antileak_weight=rl.get("reward_antileak_weight", 0.2),
             antileak_threshold=rl.get("reward_antileak_threshold", 0.80),
             rollout_log_file=rollout_log,
+            strategy=fas_strategy,
+            judge_topk=fas_cfg.get("judge_topk", 5),
+            judge_model=fas_cfg.get("judge_model", "claude-sonnet-4-6"),
         )
         reward_funcs = [reward_fas, reward_format, reward_antileak]
         reward_weights = [

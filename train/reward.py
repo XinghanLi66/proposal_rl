@@ -120,7 +120,7 @@ def reward_prs(prompts: list[str], completions: list[str], **kwargs) -> list[flo
     return scores
 
 
-# ── FAS reward (legacy) ───────────────────────────────────────────────────────
+# ── FAS reward ────────────────────────────────────────────────────────────────
 
 class FASReward:
     """Embedding-based future alignment reward. Pre-loads the val corpus index."""
@@ -130,11 +130,11 @@ class FASReward:
         index_file: str,
         embed_model: str = "sentence-transformers/all-MiniLM-L6-v2",
         topk: int = 50,
-        device: str = "cpu",
+        device: str = "cpu",  # noqa: unused — SentenceTransformer picks device automatically
     ):
         self.topk = topk
         print(f"[FASReward] Loading encoder: {embed_model}")
-        self.encoder = SentenceTransformer(embed_model, device=device)
+        self.encoder = SentenceTransformer(embed_model)
         print(f"[FASReward] Loading index: {index_file}")
         data = np.load(index_file, allow_pickle=True)
         self.index_embs = data["embeddings"].astype(np.float32)
@@ -157,7 +157,108 @@ class FASReward:
         return (-top_sims).mean(axis=1).tolist()
 
 
-_fas_reward: FASReward | None = None
+class LLMJudgeFASReward:
+    """
+    LLM-judge FAS reward for training (mirrors eval/fas.py LLMJudgeFAS).
+
+    Per completion:
+      1. Retrieve top judge_topk abstracts by embedding similarity.
+      2. Call Claude to score each (proposal, abstract) pair 0-10.
+      3. reward = max_score / 10  (MAX aggregation, same as reference paper).
+
+    Slow (~judge_topk API calls per completion). Reduce judge_topk to keep
+    wall-clock time manageable (exp08 uses judge_topk=5).
+    """
+
+    _JUDGE_PROMPT = (
+        "Rate how well this research proposal predicts or aligns with the future paper's abstract.\n"
+        "Consider whether the proposal anticipates the same research direction, problem, or approach.\n\n"
+        "Research proposal:\n{proposal}\n\n"
+        "Future paper abstract:\n{abstract}\n\n"
+        "Score from 0 to 10 (integer only, 0=no alignment, 10=perfect alignment):"
+    )
+
+    _PROXY_URL = "http://10.39.10.241:10001"
+
+    def __init__(
+        self,
+        index_file: str,
+        embed_model: str = "sentence-transformers/all-MiniLM-L6-v2",
+        judge_topk: int = 5,
+        judge_model: str = "claude-sonnet-4-6",
+        device: str = "cpu",
+    ):
+        import os
+        import anthropic
+        self.judge_topk = judge_topk
+        self.judge_model = judge_model
+        print(f"[LLMJudgeFASReward] Loading encoder: {embed_model}")
+        self.encoder = SentenceTransformer(embed_model, device=device)
+        print(f"[LLMJudgeFASReward] Loading index: {index_file}")
+        data = np.load(index_file, allow_pickle=True)
+        self.index_embs = data["embeddings"].astype(np.float32)
+        self.index_ids  = data["arxiv_ids"].tolist()
+        self.abstracts  = data["abstracts"].tolist() if "abstracts" in data else []
+        print(f"[LLMJudgeFASReward] Index loaded: {self.index_embs.shape}  abstracts={len(self.abstracts)}")
+        api_key = os.environ.get("ANTHROPIC_API_KEY") or "123"
+        self.client = anthropic.Anthropic(
+            api_key=api_key, base_url=self._PROXY_URL, timeout=120.0, max_retries=2
+        )
+
+    def _judge_one(self, proposal: str, abstract: str) -> float:
+        prompt = self._JUDGE_PROMPT.format(
+            proposal=proposal[:2000], abstract=abstract[:1000]
+        )
+        try:
+            import httpx as _httpx
+            base = str(self.client.base_url).rstrip("/")
+            resp = _httpx.post(
+                f"{base}/v1/messages",
+                headers={
+                    "x-api-key": self.client.api_key,
+                    "anthropic-version": "2023-06-01",
+                    "content-type": "application/json",
+                },
+                json={
+                    "model": self.judge_model,
+                    "max_tokens": 8,
+                    "messages": [{"role": "user", "content": prompt}],
+                },
+                timeout=120.0,
+            )
+            resp.raise_for_status()
+            import json as _json
+            data = _json.loads(resp.content.decode("utf-8", errors="replace"))
+            text = data["content"][0]["text"].strip()
+            m = re.search(r"\d+", text)
+            return min(int(m.group()), 10) / 10.0 if m else 0.0
+        except Exception:
+            return 0.0
+
+    def score(self, texts: list[str]) -> list[float]:
+        if not texts:
+            return []
+        embs = self.encoder.encode(
+            texts,
+            batch_size=min(len(texts), 32),
+            normalize_embeddings=True,
+            convert_to_numpy=True,
+        ).astype(np.float32)
+        sims = embs @ self.index_embs.T   # [B, N]
+
+        results = []
+        for i, proposal in enumerate(texts):
+            topk = min(self.judge_topk, sims.shape[1])
+            top_idx = np.argpartition(-sims[i], topk)[:topk]
+            scores = [
+                self._judge_one(proposal, self.abstracts[j] if j < len(self.abstracts) else "")
+                for j in top_idx
+            ]
+            results.append(max(scores) if scores else 0.0)
+        return results
+
+
+_fas_reward: FASReward | LLMJudgeFASReward | None = None
 _fas_weight: float = 0.6
 _format_weight: float = 0.2
 _antileak_weight: float = 0.2
@@ -173,10 +274,17 @@ def init_reward(
     antileak_weight: float = 0.2,
     antileak_threshold: float = 0.80,
     rollout_log_file: str | None = None,
+    strategy: str = "embedding",
+    judge_topk: int = 5,
+    judge_model: str = "claude-sonnet-4-6",
+    device: str = "cpu",
 ) -> None:
-    """Initialise FAS mode rewards."""
+    """Initialise FAS mode rewards. strategy='embedding' or 'llm_judge'."""
     global _fas_reward, _fas_weight, _format_weight, _antileak_weight, _antileak_threshold
-    _fas_reward = FASReward(index_file, embed_model, topk)
+    if strategy == "llm_judge":
+        _fas_reward = LLMJudgeFASReward(index_file, embed_model, judge_topk, judge_model, device)
+    else:
+        _fas_reward = FASReward(index_file, embed_model, topk, device)
     _fas_weight = fas_weight
     _format_weight = format_weight
     _antileak_weight = antileak_weight
