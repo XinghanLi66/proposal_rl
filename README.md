@@ -164,6 +164,47 @@ See [`scripts/README.md`](scripts/README.md) for the full monitoring and multi-m
 
 ---
 
+## Playground (`scripts/probe.py`)
+
+Inspect any checkpoint's output for a single paper, with optional side-by-side comparison against Claude baselines and per-example FAS scoring.
+
+```bash
+# Print the constructed prompt for a paper (no model needed)
+python scripts/probe.py --paper 2501.12345 --prompt-only
+
+# Run a checkpoint on a paper looked up by arxiv_id
+python scripts/probe.py --checkpoint runs/rl/final --paper 2501.12345
+
+# Load from a pre-built dataset JSONL (fastest — no API call)
+python scripts/probe.py --checkpoint runs/rl/final --record runs/dataset/test.jsonl --index 0
+
+# Compare checkpoint output side-by-side with Claude CoT synthesis
+python scripts/probe.py --checkpoint runs/rl/final --cot --paper 2501.12345
+
+# Run Claude as a zero-shot baseline on the inference prompt
+python scripts/probe.py --baseline --paper 2501.12345
+
+# Override the prompt strategy (rebuilds prompt on the fly)
+python scripts/probe.py --checkpoint runs/rl/final --paper 2501.12345 --strategy full_refs
+```
+
+**Key flags:**
+
+| Flag | Description |
+|------|-------------|
+| `--checkpoint PATH` | Local checkpoint (LoRA adapter or full HF model) |
+| `--cot` | Synthesize a CoT proposal via Claude (mirrors SFT training data synthesis) |
+| `--baseline` | Run `claude-opus-4-6` on the inference prompt as a zero-shot baseline |
+| `--strategy STRATEGY` | Override prompt builder strategy (`full_refs`, `top_k_refs`, `related_work`, `top_k_related_work`, `with_research_question`) |
+| `--index-split val\|test` | Which FAS index to score against (default: `test`) |
+| `--no-fas` | Skip FAS evaluation (faster) |
+| `--prompt-only` | Print prompt and exit, no generation |
+| `--max-new-tokens N` | Generation length (default: 2048) |
+
+All three generation modes (`--checkpoint`, `--cot`, `--baseline`) can be combined in one call; each output is scored independently with FAS.
+
+---
+
 ## Training Dashboard
 
 ```bash
