@@ -113,6 +113,12 @@ def extract_proposal_text(response: str) -> str:
 
 def _extract_ref_text(prompt: str) -> str:
     """Extract the core reference block from a formatted prompt string."""
+    # WITH_QUESTION_TEMPLATE: "Below are N papers...\n\n{ref_block}\n\nThe researcher has identified..."
+    # Must be checked before USER_TEMPLATE because USER_TEMPLATE regex would over-capture the
+    # research question text that follows the ref block in this template.
+    m = re.search(r"Below are \d+ papers.*?\n\n(.*?)\n\nThe researcher has identified", prompt, re.DOTALL)
+    if m:
+        return m.group(1)
     # USER_TEMPLATE: "Below are N papers ... \n\n{ref_block}\n\nGenerate a structured"
     m = re.search(r"Below are \d+ papers.*?\n\n(.*?)\n\nGenerate a structured", prompt, re.DOTALL)
     if m:

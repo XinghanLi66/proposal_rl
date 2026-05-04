@@ -11,8 +11,8 @@
 #   EXTRA_OVERRIDES — (optional) additional "key=value" pairs
 #
 # Optional control flags:
-#   SKIP_SFT=1          — skip CoT synthesis + SFT phases (exp15: RL-only from external SFT)
 #   SFT_CKPT_OVERRIDE   — explicit SFT checkpoint path for RL (used by exp15)
+#                         exp15 skips SFT by simply not calling the SFT functions
 # ─────────────────────────────────────────────────────────────────────────────
 
 REPO=/newcpfs/lxh/agentic-training/proposal_rl
@@ -339,7 +339,7 @@ run_rl_full_training() {
         train/rl.py --config "$full_cfg" \
         2>&1 | tee "$log" \
         && echo "[${EXP_NAME}] RL done → ${EXP_DIR}/rl/final" \
-        || echo "[${EXP_NAME}] ERROR: RL full training failed — check $log"
+        || { echo "[${EXP_NAME}] ERROR: RL full training failed — check $log"; exit 1; }
 }
 
 # ─────────────────────────────────────────────────────────────────────────────
