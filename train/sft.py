@@ -3,10 +3,16 @@
 SFT cold-start: train on (reference list → CoT proposal) pairs.
 
 Supports full fine-tuning and LoRA (set sft.finetune_mode in config).
+Supports all prompt-builder strategies: prompts are rebuilt on-the-fly from
+the `refs` field in train_cot.jsonl so that the SFT input distribution matches
+the RL prompt distribution for each ablation.
 
 Usage:
     torchrun --nproc_per_node=8 train/sft.py --config configs/base.yaml
-    torchrun --nproc_per_node=8 train/sft.py --config configs/base.yaml --resume
+    torchrun --nproc_per_node=8 train/sft.py --config my_config.yaml --resume
+
+The output directory is controlled by sft.output_dir in the config
+(default: {runs_dir}/sft/{strategy}).
 """
 
 from __future__ import annotations
@@ -27,6 +33,8 @@ from datasets import Dataset
 from peft import LoraConfig, TaskType
 from transformers import AutoModelForCausalLM, AutoTokenizer
 from trl import SFTConfig, SFTTrainer
+
+from train.prompt_builder import get_builder
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 log = logging.getLogger(__name__)
@@ -69,12 +77,17 @@ def main():
     sft = cfg.get("sft", {})
     runs_dir = Path(cfg["runs_dir"])
 
-    model_path   = find_model(cfg)
-    dataset_file = runs_dir / "dataset" / "train_cot.jsonl"
-    output_dir   = runs_dir / "sft"
+    strategy = cfg.get("prompt_builder", {}).get("strategy", "full_refs")
     finetune_mode = sft.get("finetune_mode", "lora")   # lora | full
 
-    log.info(f"finetune_mode={finetune_mode}  model={model_path}")
+    # Output dir: explicit override > runs/sft/{strategy}
+    output_dir = Path(sft["output_dir"]) if sft.get("output_dir") else runs_dir / "sft" / strategy
+
+    model_path   = find_model(cfg)
+    dataset_file = runs_dir / "dataset" / "train_cot.jsonl"
+
+    log.info(f"strategy={strategy}  finetune_mode={finetune_mode}  model={model_path}")
+    log.info(f"output_dir={output_dir}")
 
     tokenizer = AutoTokenizer.from_pretrained(model_path, trust_remote_code=True)
     tokenizer.padding_side = "right"
@@ -84,18 +97,36 @@ def main():
     records = load_records(dataset_file)
     log.info(f"Loaded {len(records)} training examples from {dataset_file}")
 
-    # Format as full chat strings for SFT.
-    # NOTE: the `prompt` field was built with the full_refs strategy when the
-    # CoT was synthesised. To use a different prompt_builder strategy, re-run
-    # data/build_dataset.py and data/synthesize_cot.py first.
+    # Build the prompt builder for this strategy.
+    # Prompts are rebuilt from each record's `refs` field so the SFT input
+    # distribution matches the RL training distribution for this ablation.
+    # The cot_proposal (assistant target) is the same for all strategies.
+    pb_cfg = cfg.get("prompt_builder", {}).copy()
+    pb_cfg["runs_dir"] = str(runs_dir)
+    builder = get_builder({**cfg, "prompt_builder": pb_cfg})
+    log.info(f"Prompt builder: {type(builder).__name__}")
+
+    rebuilt = 0
     texts = []
     for r in records:
+        if strategy == "full_refs" and r.get("prompt"):
+            # full_refs is the original strategy — reuse stored prompt directly
+            system = r["system"]
+            prompt = r["prompt"]
+        else:
+            # Rebuild prompt for this strategy from the refs field
+            system = builder.system()
+            prompt = builder.build(r)
+            rebuilt += 1
         messages = [
-            {"role": "system",    "content": r["system"]},
-            {"role": "user",      "content": r["prompt"]},
+            {"role": "system",    "content": system},
+            {"role": "user",      "content": prompt},
             {"role": "assistant", "content": r["cot_proposal"]},
         ]
         texts.append(tokenizer.apply_chat_template(messages, tokenize=False))
+
+    if rebuilt:
+        log.info(f"Rebuilt {rebuilt}/{len(records)} prompts using strategy={strategy}")
     dataset = Dataset.from_dict({"text": texts})
 
     peft_config = None
@@ -148,7 +179,7 @@ def main():
     trainer.train(resume_from_checkpoint=args.resume)
     trainer.save_model(str(output_dir / "final"))
     tokenizer.save_pretrained(str(output_dir / "final"))
-    log.info("SFT complete.")
+    log.info(f"SFT complete → {output_dir}/final")
 
 
 if __name__ == "__main__":

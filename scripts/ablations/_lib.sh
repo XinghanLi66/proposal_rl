@@ -69,6 +69,24 @@ setup_experiment() {
     echo "[${EXP_NAME}] finetune = $FINETUNE_MODE"
     echo "[${EXP_NAME}] reward   = $REWARD_TYPE"
 
+    # Resolve SFT checkpoint: explicit SFT_CHECKPOINT env var wins, then the
+    # strategy-matched checkpoint, then the legacy runs/sft/final fallback.
+    local _sft_subdir="${STRATEGY}"
+    [[ "${FINETUNE_MODE}" == "lora" ]] && _sft_subdir="${STRATEGY}_lora"
+    local _default_sft="${REPO}/runs/sft/${_sft_subdir}/final"
+    local _legacy_sft="${REPO}/runs/sft/final"
+    local _resolved_sft="${SFT_CHECKPOINT:-}"
+    if [[ -z "$_resolved_sft" ]]; then
+        if [[ -d "$_default_sft" ]]; then
+            _resolved_sft="$_default_sft"
+        else
+            echo "[${EXP_NAME}] WARNING: strategy-matched SFT not found at ${_default_sft}"
+            echo "[${EXP_NAME}]          falling back to ${_legacy_sft}"
+            _resolved_sft="$_legacy_sft"
+        fi
+    fi
+    echo "[${EXP_NAME}] sft_ckpt = ${_resolved_sft}"
+
     # Build the experiment's base config (without lr/kl overrides yet)
     # shellcheck disable=SC2206
     local overrides=(
@@ -76,6 +94,7 @@ setup_experiment() {
         "rl.finetune_mode=${FINETUNE_MODE}"
         "rl.reward_type=${REWARD_TYPE}"
         "rl.output_dir=${EXP_DIR}/rl"
+        "rl.sft_checkpoint=${_resolved_sft}"
     )
     if [[ -n "${EXTRA_OVERRIDES:-}" ]]; then
         read -r -a extra_arr <<< "$EXTRA_OVERRIDES"
