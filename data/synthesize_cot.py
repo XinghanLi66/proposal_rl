@@ -111,6 +111,19 @@ def extract_proposal_text(response: str) -> str:
 
 # ---- Async API client --------------------------------------------------------
 
+def _extract_ref_text(prompt: str) -> str:
+    """Extract the core reference block from a formatted prompt string."""
+    # USER_TEMPLATE: "Below are N papers ... \n\n{ref_block}\n\nGenerate a structured"
+    m = re.search(r"Below are \d+ papers.*?\n\n(.*?)\n\nGenerate a structured", prompt, re.DOTALL)
+    if m:
+        return m.group(1)
+    # RELATED_WORK_TEMPLATE: "... studying the following area ...\n\n{narrative}\n\nBased on"
+    m = re.search(r"studying the following area[^\n]*\n\n(.*?)\n\nBased on this", prompt, re.DOTALL)
+    if m:
+        return m.group(1)
+    return prompt[:3000]
+
+
 async def synthesize_one(
     client: anthropic.AsyncAnthropic,
     record: dict,
@@ -120,9 +133,7 @@ async def synthesize_one(
     semaphore: asyncio.Semaphore,
 ) -> dict | None:
     ref_block = record.get("prompt", "")
-    # Extract just the ref listing from the prompt (strip header/footer)
-    m = re.search(r"Below are \d+ papers.*?\n\n(.*?)\n\nGenerate a structured", ref_block, re.DOTALL)
-    ref_text = m.group(1) if m else ref_block[:3000]
+    ref_text = _extract_ref_text(ref_block)
 
     abstract = record.get("abstract", "")
 
@@ -228,6 +239,9 @@ def main():
     parser.add_argument("--config", default="configs/base.yaml")
     parser.add_argument("--input", help="Override input JSONL (default: runs/dataset/train.jsonl)")
     parser.add_argument("--output", help="Override output JSONL (default: runs/dataset/train_cot.jsonl)")
+    parser.add_argument("--strategy", default=None,
+                        help="Rebuild prompts from refs using this strategy before synthesis. "
+                             "Allows per-experiment CoT synthesis aligned with the training prompt format.")
     parser.add_argument("--limit", type=int, default=None)
     args = parser.parse_args()
 
@@ -261,6 +275,26 @@ def main():
         records = records[:args.limit]
 
     log.info(f"Loaded {len(records)} records from {input_file}")
+
+    # Optionally rebuild prompts using a different strategy so synthesis input
+    # aligns with the RL training prompt format for this experiment.
+    if args.strategy:
+        import sys
+        _repo = str(Path(__file__).resolve().parent.parent)
+        if _repo not in sys.path:
+            sys.path.insert(0, _repo)
+        from train.prompt_builder import get_builder
+        pb_cfg = cfg.get("prompt_builder", {}).copy()
+        pb_cfg["strategy"] = args.strategy
+        pb_cfg["runs_dir"] = str(runs_dir)
+        builder = get_builder({**cfg, "prompt_builder": pb_cfg})
+        log.info(f"Rebuilding prompts with strategy={args.strategy} ({type(builder).__name__})")
+        rebuilt = []
+        for r in records:
+            rebuilt.append({**r, "system": builder.system(), "prompt": builder.build(r)})
+        records = rebuilt
+        log.info(f"Rebuilt {len(records)} prompts")
+
     done_ids = load_done(output_file)
 
     asyncio.run(run_synthesis(

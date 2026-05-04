@@ -84,7 +84,7 @@ def main():
     output_dir = Path(sft["output_dir"]) if sft.get("output_dir") else runs_dir / "sft" / strategy
 
     model_path   = find_model(cfg)
-    dataset_file = runs_dir / "dataset" / "train_cot.jsonl"
+    dataset_file = Path(sft["dataset_file"]) if sft.get("dataset_file") else runs_dir / "dataset" / "train_cot.jsonl"
 
     log.info(f"strategy={strategy}  finetune_mode={finetune_mode}  model={model_path}")
     log.info(f"output_dir={output_dir}")
@@ -95,6 +95,8 @@ def main():
         tokenizer.pad_token = tokenizer.eos_token
 
     records = load_records(dataset_file)
+    if sft.get("limit"):
+        records = records[: int(sft["limit"])]
     log.info(f"Loaded {len(records)} training examples from {dataset_file}")
 
     # Build the prompt builder for this strategy.

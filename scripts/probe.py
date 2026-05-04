@@ -168,6 +168,130 @@ def load_record_from_dataset(arxiv_id: str, runs_dir: Path) -> dict | None:
     return None
 
 
+_S2_REFS_URL = "https://api.semanticscholar.org/graph/v1/paper/ARXIV:{arxiv_id}/references"
+_S2_FIELDS   = "title,year,externalIds,abstract"
+
+
+_TITLE_YEAR_PREFIX = re.compile(r"^\s*\d{4}\s*\.\s*")   # e.g. "2025. Title..." → "Title..."
+_TITLE_LEAD_PUNCT  = re.compile(r"^[\s.,;:]+")            # leading ". Title" → "Title"
+
+
+def _clean_title(title: str) -> str:
+    """Strip S2 year-prefix and leading punctuation artefacts from a title."""
+    title = _TITLE_YEAR_PREFIX.sub("", title)
+    title = _TITLE_LEAD_PUNCT.sub("", title)
+    return title
+
+
+def _fetch_refs_s2(arxiv_id: str, arxiv_root: Path | None = None) -> list[dict]:
+    """Fetch reference list from Semantic Scholar API. Returns list of ref dicts.
+
+    For refs that have an ArXiv ID and no abstract from S2, falls back to the
+    local arxiv store (if arxiv_root is provided) to retrieve the abstract.
+    """
+    import httpx
+    url = _S2_REFS_URL.format(arxiv_id=arxiv_id)
+    print(f"  [fetching refs from Semantic Scholar for {arxiv_id}...]")
+    try:
+        resp = httpx.get(url, params={"fields": _S2_FIELDS, "limit": 100}, timeout=30.0)
+        resp.raise_for_status()
+        data = resp.json()
+    except Exception as e:
+        print(f"  WARNING: S2 API call failed: {e}", file=sys.stderr)
+        return []
+
+    refs = []
+    local_fallbacks = 0
+    for item in data.get("data", []):
+        paper = item.get("citedPaper", {})
+        ext   = paper.get("externalIds") or {}
+        aid   = ext.get("ArXiv")
+        title = _clean_title(paper.get("title") or "")
+        abstract = (paper.get("abstract") or "").strip()
+
+        # Skip non-arXiv refs — matches fetch_refs.py behaviour (training data only has arXiv refs)
+        if not aid:
+            continue
+
+        # For arXiv refs with missing abstracts, try the local store
+        if not abstract and arxiv_root:
+            meta_path = _find_metadata_in_store(aid, arxiv_root)
+            if meta_path:
+                try:
+                    meta = json.loads(meta_path.read_text())
+                    abstract = meta.get("abstract", "").strip()
+                    if abstract:
+                        local_fallbacks += 1
+                except Exception:
+                    pass
+
+        refs.append({
+            "arxiv_id": aid,
+            "title":    title,
+            "abstract": abstract,
+            "year":     paper.get("year"),
+        })
+
+    print(f"  [fetched {len(refs)} references"
+          + (f", {local_fallbacks} abstracts from local store" if local_fallbacks else "")
+          + "]")
+    return refs
+
+
+def _find_metadata_in_store(arxiv_id: str, arxiv_root: Path) -> Path | None:
+    """Find metadata.json for arxiv_id in the local store.
+
+    Tries the canonical path first (derived from the ID's YYMM prefix), then
+    falls back to scanning all year/month subdirectories — necessary when a paper
+    was crawled/updated in a different month than its submission month.
+    """
+    # Fast path: derive year/month from arxiv_id (e.g. 2603.27146 → 2026/03)
+    m = re.match(r"^(\d{2})(\d{2})\.", arxiv_id)
+    if m:
+        year  = "20" + m.group(1)
+        month = m.group(2)
+        fast = arxiv_root / year / month / arxiv_id / "metadata.json"
+        if fast.exists():
+            return fast
+
+    # Slow path: scan all year/month dirs
+    print(f"  [canonical path not found — scanning arxiv store for {arxiv_id}...]")
+    for year_dir in sorted(arxiv_root.iterdir()):
+        if not year_dir.is_dir():
+            continue
+        for month_dir in sorted(year_dir.iterdir()):
+            if not month_dir.is_dir():
+                continue
+            candidate = month_dir / arxiv_id / "metadata.json"
+            if candidate.exists():
+                return candidate
+    return None
+
+
+def load_record_from_arxiv_store(arxiv_id: str, arxiv_root: Path, builder) -> dict | None:
+    """Look up a paper from the local arxiv store and fetch its refs from S2."""
+    meta_path = _find_metadata_in_store(arxiv_id, arxiv_root)
+    if meta_path is None:
+        print(f"  [not found in arxiv store]")
+        return None
+
+    location = "/".join(meta_path.parts[-4:-1])   # e.g. "2026/04/2603.27146"
+    meta = json.loads(meta_path.read_text())
+    print(f"  [found in local arxiv store ({location})]")
+    refs = _fetch_refs_s2(arxiv_id, arxiv_root=arxiv_root)
+
+    record = {
+        "arxiv_id": arxiv_id,
+        "title":    meta.get("title", ""),
+        "abstract": meta.get("abstract", ""),
+        "created":  meta.get("created", ""),
+        "refs":     refs,
+    }
+    record["system"] = builder.system()
+    record["prompt"] = builder.build(record)
+    return record
+
+
 def load_record_from_metadata(meta_path: Path, runs_dir: Path, builder) -> dict | None:
     meta = json.loads(meta_path.read_text())
     arxiv_id = meta.get("arxiv_id")
@@ -359,6 +483,14 @@ def main():
             if args.strategy and record is not None and record.get("refs"):
                 record["system"] = builder.system()
                 record["prompt"] = builder.build(record)
+            # Fallback: look up from the local arxiv store + fetch refs from S2
+            if record is None:
+                arxiv_root = Path(cfg.get("arxiv_root", ""))
+                if arxiv_root.exists():
+                    print(f"  [not in dataset splits — trying local arxiv store + S2...]")
+                    record = load_record_from_arxiv_store(args.paper, arxiv_root, builder)
+                else:
+                    print(f"  [arxiv_root not configured or missing: {arxiv_root}]")
 
     if record is None:
         print("ERROR: could not load paper record.", file=sys.stderr)

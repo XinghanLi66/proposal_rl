@@ -210,12 +210,13 @@ class FullRefsBuilder(PromptBuilder):
     def __init__(self, cfg: dict) -> None:
         super().__init__(cfg)
         self.seed = cfg.get("shuffle_seed", 42)
+        self.abstract_chars = cfg.get("abstract_chars", 400)
 
     def build(self, record: dict) -> str:
         refs = list(record.get("refs", []))
         random.Random(self.seed).shuffle(refs)
         refs = refs[: self.max_refs]
-        ref_block = "\n\n".join(_ref_entry(i + 1, r) for i, r in enumerate(refs))
+        ref_block = "\n\n".join(_ref_entry(i + 1, r, self.abstract_chars) for i, r in enumerate(refs))
         return USER_TEMPLATE.format(n_refs=len(refs), ref_block=ref_block)
 
 

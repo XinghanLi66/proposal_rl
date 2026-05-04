@@ -33,7 +33,7 @@ eval/             Evaluation: FAS/PRS scoring, embedding index builder
 train/            Training code: SFT, RL (GRPO/RLOO), reward functions, prompt builders
 dashboard/        Flask training dashboard with per-experiment live tabs
 scripts/          End-to-end orchestration shell scripts (00–07)
-scripts/ablations/  8 ablation experiments with hparam search (exp01–exp08)
+scripts/ablations/  16 ablation experiments with hparam search (exp01–exp16)
 runs/             Generated at runtime — datasets, checkpoints, logs (git-ignored)
 ```
 
@@ -137,7 +137,9 @@ LLM-based strategies cache their outputs under `runs/dataset/prompt_cache/` to a
 
 ## Ablation Experiments
 
-Eight ablation experiments isolate the effect of each design choice. Each script runs a 2×2 hparam search (LR ∈ {2e-6, 5e-6} × KL ∈ {0.02, 0.05}) before full training.
+### Exp 01–08: RL-only (RL from shared full_refs SFT init)
+
+Eight experiments isolate the effect of each design choice at the RL level. All start from the same shared `full_refs` SFT checkpoint. Each script runs a 2×2 hparam search (LR ∈ {2e-6, 5e-6} × KL ∈ {0.02, 0.05}) before full training.
 
 | Script | Prompt strategy | Finetune | Reward | Ablates |
 |--------|----------------|----------|--------|---------|
@@ -150,6 +152,25 @@ Eight ablation experiments isolate the effect of each design choice. Each script
 | `exp07_fas.sh` | `top_k_refs` | full | FAS | PRS vs. FAS reward |
 | `exp08_llm_prs.sh` | `top_k_refs` | full | LLM-judge | embedding vs. LLM-judge reward |
 
+### Exp 09–16: Combined SFT+RL (per-strategy SFT init)
+
+Eight experiments repeat key ablations but with a freshly synthesised, per-strategy CoT SFT stage before RL. This eliminates the full_refs SFT bias present in exp01–08. Each script runs a 3×3 hparam search before both SFT (LR ∈ {5e-5, 2e-4, 5e-4} × warmup ∈ {0.03, 0.05, 0.10}) and RL (LR ∈ {1e-6, 2e-6, 5e-6} × KL ∈ {0.01, 0.02, 0.05}).
+
+| Script | Prompt strategy | Finetune | Reward | Ablates |
+|--------|----------------|----------|--------|---------|
+| `exp09_top_k_refs_sft_rl.sh` | `top_k_refs` | full | PRS | SFT format alignment (mirrors exp01) |
+| `exp10_related_work_sft_rl.sh` | `related_work` | full | PRS | SFT format alignment (mirrors exp03) |
+| `exp11_topk_rw_sft_rl.sh` | `top_k_related_work` | full | PRS | SFT format alignment (mirrors exp04) |
+| `exp12_research_q_sft_rl.sh` | `with_research_question` | full | PRS | SFT format alignment (mirrors exp05) |
+| `exp13_full_refs_sft_rl.sh` | `full_refs` | full | PRS | SFT format alignment (mirrors exp02) |
+| `exp14_full_refs_lora_sft_rl.sh` | `full_refs` | LoRA | PRS | LoRA SFT+RL (mirrors exp06) |
+| `exp15_fas_from_exp09_sft.sh` | `top_k_refs` | full | FAS | FAS reward from aligned SFT init (mirrors exp07) |
+| `exp16_full_refs_20x800_sft_rl.sh` | `full_refs` (20×800) | full | PRS | abstract depth: 20 refs × 800 chars vs. 40×400 |
+
+> **exp15 prerequisite**: exp09 must complete before exp15 is launched.  
+> exp15 auto-detects the latest `runs/exps/exp09_top_k_refs_sft_rl_*/sft/final` checkpoint.  
+> You can also override it: `SFT_CKPT_OVERRIDE=/path/to/sft/final bash exp15_fas_from_exp09_sft.sh`
+
 Run an experiment:
 
 ```bash
@@ -158,6 +179,9 @@ bash scripts/ablations/exp01_baseline.sh 2>&1 | tee /tmp/exp01.log
 
 # Override GPU count or dashboard port
 NGPU=4 DASHBOARD_PORT=8081 bash scripts/ablations/exp01_baseline.sh
+
+# Combined SFT+RL experiment
+bash scripts/ablations/exp09_top_k_refs_sft_rl.sh 2>&1 | tee /tmp/exp09.log
 ```
 
 See [`scripts/README.md`](scripts/README.md) for the full monitoring and multi-machine deployment guide.
