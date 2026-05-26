@@ -26,7 +26,7 @@ fetch:
 # --- CoT synthesis (Claude API) ---
 cot:
   model: "claude-sonnet-4-6"
-  max_tokens: 2048
+  max_tokens: 8192
   temperature: 0.8
   concurrency: 8
 
@@ -61,7 +61,7 @@ sft:
   lora_alpha: 128
   lora_target_modules: ["q_proj", "k_proj", "v_proj", "o_proj", "gate_proj", "up_proj", "down_proj"]
   lora_dropout: 0.05
-  deepspeed_config: configs/ds_zero2.json
+  deepspeed_config: null
 
 # --- RL (GRPO / RLOO) ---
 # GRPO uses PPO-clip objective (epsilon=0.2) with group-normalized advantages (no value net).
@@ -85,6 +85,9 @@ rl:
   bf16: true
   reward_type: prs             # prs | fas
   reward_prs_weight: 0.8       # used when reward_type: prs
+  reward_ppl_weight: 0.8       # used when reward_type: ppl
+  reward_ppl_max_context_tokens: 3800   # prompt+proposal truncation
+  reward_ppl_max_abstract_tokens: 200   # abstract truncation for scoring
   reward_format_weight: 0.2
   # FAS-specific (used when reward_type: fas):
   reward_fas_weight: 0.6
@@ -94,7 +97,7 @@ rl:
   lora_alpha: 128
   lora_target_modules: ["q_proj", "k_proj", "v_proj", "o_proj", "gate_proj", "up_proj", "down_proj"]
   lora_dropout: 0.05
-  deepspeed_config: configs/ds_zero2.json
+  deepspeed_config: null
 
 # --- FAS evaluation ---
 fas:

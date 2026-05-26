@@ -12,7 +12,7 @@ and save to a .npz file:
 
 This index is used by:
   - eval/evaluate.py  (final FAS computation)
-  - train/reward.py   (live GRPO reward at training time)
+  - train/verl_reward.py  (live GRPO reward at training time)
 """
 
 from __future__ import annotations

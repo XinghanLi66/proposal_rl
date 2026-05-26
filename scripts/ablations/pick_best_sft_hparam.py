@@ -22,8 +22,18 @@ if not results:
     print("ERROR: no results in sft_hparam_search.json", file=sys.stderr)
     sys.exit(1)
 
+# Filter out invalid runs: crash sentinel (≥9999), collapsed (≤0.01), or exploded (≥10)
+# A healthy SFT run should produce mean cross-entropy loss in the 0.1–8 range
+valid = [r for r in results if 0.01 < float(r.get("mean_loss", 9999.0)) < 10.0]
+if not valid:
+    print("WARNING: no valid results (0.01<loss<10); falling back to all results below 9999", file=sys.stderr)
+    valid = [r for r in results if float(r.get("mean_loss", 9999.0)) < 9999.0]
+if not valid:
+    print("WARNING: all results are crash sentinels; using all results", file=sys.stderr)
+    valid = results
+
 # Lower loss = better
-best = min(results, key=lambda r: float(r.get("mean_loss", 9999.0)))
+best = min(valid, key=lambda r: float(r.get("mean_loss", 9999.0)))
 data["best"] = best
 result_file.write_text(json.dumps(data, indent=2))
 

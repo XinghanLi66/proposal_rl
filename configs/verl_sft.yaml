@@ -1,0 +1,69 @@
+# verl SFT trainer config for proposal_rl.
+# Consumed by train/sft.py; overridden programmatically per experiment.
+# Uses FSDP (no DeepSpeed) — resolves BF16 gradient-accumulation overflow from DS 0.18.8.
+
+data:
+  train_files: null          # set by train/sft.py
+  val_files:   null
+  train_batch_size: 16       # overridden: per_device_bsz × n_gpu × grad_accum
+  micro_batch_size_per_gpu: 2
+  max_token_len_per_gpu: 8192
+  use_dynamic_bsz: true
+  messages_key: messages     # column in Parquet produced by make_parquet.py sft
+  pad_mode: no_padding
+  max_length: 8192
+  truncation: left
+  num_workers: 4
+
+model:
+  _target_: verl.workers.config.HFModelConfig
+  path: null                 # set by train/sft.py
+  trust_remote_code: false
+  enable_gradient_checkpointing: false
+  use_remove_padding: false
+  lora_rank: 0               # set to sft.lora_r for LoRA, 0 for full-FT
+  lora_alpha: 128
+  target_modules: all-linear
+
+engine:
+  _target_: verl.workers.config.FSDPEngineConfig
+  strategy: fsdp
+  dtype: bfloat16
+  param_offload: false
+  optimizer_offload: false
+  reshard_after_forward: true
+  use_torch_compile: false    # compile can break on first run; off for stability
+
+optim:
+  _target_: verl.workers.config.FSDPOptimizerConfig
+  optimizer: AdamW
+  optimizer_impl: torch.optim
+  lr: 2.0e-4                  # overridden per experiment
+  lr_warmup_steps_ratio: 0.05
+  weight_decay: 0.01
+  clip_grad: 1.0
+  lr_scheduler_type: cosine
+
+checkpoint:
+  _target_: verl.trainer.config.CheckpointConfig
+  save_contents: ["model", "optimizer", "extra"]
+  load_contents: ["model", "optimizer", "extra"]
+
+trainer:
+  default_local_dir: null     # set by train/sft.py
+  default_hdfs_dir: null
+  project_name: proposal_rl
+  experiment_name: sft
+  total_epochs: 2
+  total_training_steps: null
+  logger: ["console"]
+  seed: 42
+  save_freq: 200
+  test_freq: -1
+  max_ckpt_to_keep: 3
+  resume_mode: disable
+  resume_from_path: null
+  device: cuda
+  nnodes: 1
+  n_gpus_per_node: 8
+  profile_interval: [-1, -1]

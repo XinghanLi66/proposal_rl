@@ -45,18 +45,39 @@ else
     TORCHRUN_CMD="conda run -n $CONDA_ENV --no-capture-output torchrun"
 fi
 export DISABLE_VERSION_CHECK=1
+# torchrl registers a broken vLLM plugin (fp32_overrides) that imports vllm.worker.worker
+# which was removed in vLLM >=0.7. Disable external plugins to prevent vLLMHttpServer crashes.
+export VLLM_PLUGINS=""
+# Ray workers all import sympy→gmpy2 concurrently. On glibc 2.28 this causes:
+#   _dl_allocate_tls_init: Assertion `listp != NULL` failed!
+# SYMPY_GROUND_TYPES=python skips the gmpy2 dlopen entirely.
+export SYMPY_GROUND_TYPES="python"
+# ProcessGroupNCCL watchdog default timeout (600s) is too short for large SFT steps
+# that hold the GIL during CudaEventDestroy. Extend to 30 min to suppress false-positive
+# SIGABRT kills on rank 2 after the first optimizer step.
+export TORCH_NCCL_HEARTBEAT_TIMEOUT_SEC=${TORCH_NCCL_HEARTBEAT_TIMEOUT_SEC:-1800}
+# On glibc 2.28, loading libcuda after pthread_create causes TLS slot allocation
+# failures (_dl_allocate_tls_init: Assertion `listp != NULL` failed!) when many
+# Ray workers dlopen CUDA concurrently. Force-loading libcuda at process start
+# via LD_PRELOAD ensures TLS descriptors are set up before any threads spawn.
+export LD_PRELOAD="${LD_PRELOAD:+${LD_PRELOAD}:}/usr/lib/x86_64-linux-gnu/libcuda.so.1"
+# vLLM v1 multiprocessing executor triggers intermittent "none_dealloc: deallocating None"
+# Python GC refcount corruption during collective_rpc weight-sync (update_weights step).
+# Setting VLLM_ENABLE_V1_MULTIPROCESSING=0 switches to the uniproc executor, running
+# the GPU worker in-process instead of a subprocess, avoiding cross-process IPC teardown.
+export VLLM_ENABLE_V1_MULTIPROCESSING=0
 
 _free_port() {
-    python3 -c "import socket; s=socket.socket(); s.bind(('',0)); \
+    $PY -c "import socket; s=socket.socket(); s.bind(('',0)); \
 p=s.getsockname()[1]; s.close(); print(p)"
 }
 
 # ─── Hparam grids ────────────────────────────────────────────────────────────
 
 # SFT 3×3: learning rate × warmup ratio
-SFT_HP_LRS=(5e-5 2e-4 5e-4)
+SFT_HP_LRS=(1e-5 2e-5 5e-5)
 SFT_HP_WARMUPS=(0.03 0.05 0.10)
-SFT_HP_LIMIT=2048        # training examples per mini-run
+SFT_HP_LIMIT=8192        # training examples per mini-run
 
 # RL 3×3: learning rate × KL coefficient
 RL_HP_LRS=(1e-6 2e-6 5e-6)
@@ -88,6 +109,16 @@ setup_combined_experiment() {
         "rl.finetune_mode=${FINETUNE_MODE}"
         "rl.reward_type=${REWARD_TYPE}"
         "rl.output_dir=${EXP_DIR}/rl"
+        "rl.n_gpus=${NGPU}"
+    )
+    # verl uses FSDP (not DeepSpeed) — no DS config needed for either SFT or RL.
+    # gradient_accumulation is expressed via FSDP micro-batch logic; set to 1 for
+    # consistency with how verl computes effective batch size.
+    overrides+=(
+        "sft.deepspeed_config="
+        "sft.gradient_accumulation_steps=1"
+        "rl.deepspeed_config="
+        "rl.gradient_accumulation_steps=1"
     )
     if [[ -n "${EXTRA_OVERRIDES:-}" ]]; then
         read -r -a extra_arr <<< "$EXTRA_OVERRIDES"
@@ -103,7 +134,7 @@ setup_combined_experiment() {
 # ─────────────────────────────────────────────────────────────────────────────
 register_dashboard() {
     local payload
-    payload=$(python3 -c "
+    payload=$($PY -c "
 import json
 print(json.dumps({
     'exp_id':   '${EXP_ID}',
@@ -141,13 +172,32 @@ start_dashboard_refresh() {
 # ─────────────────────────────────────────────────────────────────────────────
 run_cot_synthesis() {
     local log="${EXP_LOG_DIR}/cot_synthesis_${EXP_ID}.log"
+    local out="${EXP_DIR}/train_cot.jsonl"
     echo "[${EXP_NAME}] === CoT synthesis (strategy=${STRATEGY}) ==="
-    echo "[${EXP_NAME}] Output → ${EXP_DIR}/train_cot.jsonl"
+    echo "[${EXP_NAME}] Output → ${out}"
+
+    # Auto-detect the most COMPLETE CoT from a previous run of this experiment
+    # (same EXP_NAME prefix, different timestamp).  Pick by highest line count
+    # so a partial file from a killed run is never preferred over a complete one.
+    local _prev_cot _best_n=0 _f _n
+    for _f in "${REPO}/runs/exps/${EXP_NAME}_"*/train_cot.jsonl; do
+        [[ "$_f" == "$out" ]] && continue
+        [[ -s "$_f" ]] || continue
+        _n=$(wc -l < "$_f")
+        if (( _n > _best_n )); then
+            _best_n=$_n
+            _prev_cot=$_f
+        fi
+    done
+    if [[ -n "${_prev_cot:-}" ]]; then
+        echo "[${EXP_NAME}] Seeding CoT cache from previous run (${_best_n} records): ${_prev_cot}"
+        cp "$_prev_cot" "$out"
+    fi
 
     $PY data/synthesize_cot.py \
         --config "$BASE_CFG" \
         --input  "$REPO/runs/dataset/train.jsonl" \
-        --output "${EXP_DIR}/train_cot.jsonl" \
+        --output "$out" \
         --strategy "${STRATEGY}" \
         2>&1 | tee "$log" \
         && echo "[${EXP_NAME}] CoT synthesis done." \
@@ -175,10 +225,13 @@ _run_one_sft_mini() {
                "sft.save_steps=9999" \
                "sft.logging_steps=5" \
                "sft.output_dir=${mini_out}" \
-               "sft.limit=${SFT_HP_LIMIT}"
+               "sft.limit=${SFT_HP_LIMIT}" \
+               "sft.gradient_accumulation_steps=1" \
+               "sft.deepspeed_config="
 
     local port
     port=$(_free_port)
+    PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True \
     $TORCHRUN_CMD \
         --nproc_per_node "$NGPU" \
         --master_port "$port" \
@@ -190,7 +243,7 @@ _run_one_sft_mini() {
     mean_loss=$($PY scripts/ablations/extract_sft_metric.py "$mini_log" 20)
     echo "[${EXP_NAME}] SFT lr=${lr}  warmup=${warmup}  mean_loss=${mean_loss}"
 
-    python3 - <<PYEOF
+    $PY - <<PYEOF
 import json
 from pathlib import Path
 f = Path("${EXP_DIR}/sft_hparam_search.json")
@@ -232,11 +285,12 @@ run_sft_full_training() {
 
     local port
     port=$(_free_port)
+    PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True \
     $TORCHRUN_CMD \
         --nproc_per_node "$NGPU" \
         --master_port "$port" \
-        train/sft.py --config "$full_cfg" \
-        2>&1 | tee "$log" \
+        train/sft.py --config "$full_cfg" --resume \
+        2>&1 | tee -a "$log" \
         && echo "[${EXP_NAME}] SFT done → ${EXP_DIR}/sft/final" \
         || { echo "[${EXP_NAME}] ERROR: SFT full training failed — check $log"; exit 1; }
 }
@@ -265,12 +319,9 @@ _run_one_rl_mini() {
                "rl.output_dir=${mini_out}" \
                "rl.limit=${RL_HP_LIMIT}"
 
-    local port
-    port=$(_free_port)
-    $TORCHRUN_CMD \
-        --nproc_per_node "$NGPU" \
-        --master_port "$port" \
-        train/rl.py --config "$mini_cfg" \
+    # verl RL uses Ray (single-process launcher — Ray spawns workers internally)
+    # expandable_segments is incompatible with vLLM memory pool (pytorch#147851) — must not be set.
+    NGPU="$NGPU" PYTORCH_CUDA_ALLOC_CONF="" $PY train/rl.py --config "$mini_cfg" \
         2>&1 | tee "$mini_log" || \
         echo "[${EXP_NAME}] WARNING: RL mini lr=${lr} kl=${kl} exited non-zero"
 
@@ -278,7 +329,7 @@ _run_one_rl_mini() {
     mean_reward=$($PY scripts/ablations/extract_reward.py "$mini_log" 10)
     echo "[${EXP_NAME}] RL lr=${lr}  kl=${kl}  mean_reward=${mean_reward}"
 
-    python3 - <<PYEOF
+    $PY - <<PYEOF
 import json
 from pathlib import Path
 f = Path("${EXP_DIR}/rl_hparam_search.json")
@@ -331,12 +382,10 @@ run_rl_full_training() {
                "rl.kl_coeff=${BEST_KL}" \
                "rl.sft_checkpoint=${_RL_SFT_CKPT}"
 
-    local port
-    port=$(_free_port)
-    $TORCHRUN_CMD \
-        --nproc_per_node "$NGPU" \
-        --master_port "$port" \
-        train/rl.py --config "$full_cfg" \
+    # verl RL uses Ray (single-process launcher)
+    # expandable_segments is incompatible with vLLM memory pool (pytorch#147851) — must not be set.
+    NGPU="$NGPU" PYTORCH_CUDA_ALLOC_CONF="" \
+    $PY train/rl.py --config "$full_cfg" --resume \
         2>&1 | tee "$log" \
         && echo "[${EXP_NAME}] RL done → ${EXP_DIR}/rl/final" \
         || { echo "[${EXP_NAME}] ERROR: RL full training failed — check $log"; exit 1; }

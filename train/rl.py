@@ -1,22 +1,31 @@
 #!/usr/bin/env python3
 """
-RL fine-tuning (GRPO or RLOO) on top of the SFT checkpoint.
+RL fine-tuning (GRPO) via verl's Ray PPO/GRPO trainer.
 
-Reward mode is controlled by rl.reward_type in the config:
-  prs  — Paper Recovery Score (default): cosine sim(proposal, abstract)
-  fas  — Future Alignment Score (legacy): similarity to val corpus index
+verl uses Ray + FSDP for the actor/rollout and does not require DeepSpeed.
+The dataset must be a Parquet file built by train/make_parquet.py.
+Reward is computed by train/verl_reward.py via verl's custom_reward_function hook.
 
 Usage:
-    torchrun --nproc_per_node=8 train/rl.py --config configs/base.yaml
-    torchrun --nproc_per_node=8 train/rl.py --config configs/base.yaml --resume
+  # Full experiment run:
+  python train/rl.py --config exp_config.yaml [--resume]
+
+  # Smoke test (1 step, 8 examples, no config file needed):
+  python train/rl.py --smoke [--output /tmp/smoke_rl]
+
+(Single-process launcher — Ray handles the distributed workers internally.)
+
+Reward modes (rl.reward_type in config):
+  prs  — Paper Recovery Score: cosine sim(proposal, abstract)
+  fas  — Future Alignment Score: similarity to held-out future corpus index
 """
 
 from __future__ import annotations
 
 import argparse
 import datetime
-import json
-import logging
+import os
+import shutil
 import sys
 from pathlib import Path
 
@@ -24,242 +33,347 @@ _REPO_ROOT = str(Path(__file__).resolve().parent.parent)
 if _REPO_ROOT not in sys.path:
     sys.path.insert(0, _REPO_ROOT)
 
-import torch
+# ── Environment setup (must run before Ray/vLLM/torch are imported) ──────────
+# Route all cache dirs to /dev/shm to avoid /tmp (100G, often full) and NFS.
+def _setup_env():
+    defaults = {
+        "TORCHINDUCTOR_CACHE_DIR": "/dev/shm/torch_inductor",
+        "TRITON_CACHE_DIR":        "/dev/shm/triton_cache",
+        "TMPDIR":                  "/dev/shm/tmp",
+        "OMP_NUM_THREADS":         "1",
+        # torchrl registers 'fp32_overrides' vLLM plugin that imports the
+        # removed vllm.worker module (vLLM >=0.7). Disable external plugins.
+        "VLLM_PLUGINS":            "",
+        # Ray workers all import sympy which calls dlopen('gmpy2.so') concurrently.
+        # On glibc 2.28, concurrent dlopen of TLS-bearing libraries triggers:
+        #   _dl_allocate_tls_init: Assertion `listp != NULL` failed!
+        # Setting SYMPY_GROUND_TYPES=python tells sympy to use pure-Python integer
+        # arithmetic and skip the gmpy2 import entirely, eliminating the race.
+        "SYMPY_GROUND_TYPES": "python",
+        # vLLM v1 multiprocessing executor triggers intermittent "none_dealloc: deallocating
+        # None" Python GC refcount corruption during collective_rpc in update_weights.
+        # Uniproc mode runs the GPU worker in-process, avoiding cross-process IPC teardown.
+        "VLLM_ENABLE_V1_MULTIPROCESSING": "0",
+    }
+    # LD_PRELOAD: force libcuda into the process address space before any threads
+    # are created, preventing glibc 2.28 TLS assertion failures when many Ray
+    # workers concurrently dlopen CUDA (_dl_allocate_tls_init: listp != NULL).
+    _libcuda = "/usr/lib/x86_64-linux-gnu/libcuda.so.1"
+    if os.path.exists(_libcuda):
+        _existing = os.environ.get("LD_PRELOAD", "")
+        os.environ["LD_PRELOAD"] = (f"{_existing}:{_libcuda}" if _existing else _libcuda)
+    for k, v in defaults.items():
+        os.environ.setdefault(k, v)
+    for d in [os.environ["TORCHINDUCTOR_CACHE_DIR"],
+              os.environ["TRITON_CACHE_DIR"],
+              os.environ["TMPDIR"]]:
+        Path(d).mkdir(parents=True, exist_ok=True)
+
+_setup_env()
+
 import yaml
-from datasets import Dataset
-from peft import LoraConfig, PeftModel, TaskType
-from transformers import AutoModelForCausalLM, AutoTokenizer
-
-from train.prompt_builder import get_builder
-from train.reward import (
-    init_encoder, init_reward,
-    reward_prs, reward_fas, reward_format, reward_antileak,
-)
-
-logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
-log = logging.getLogger(__name__)
+from omegaconf import OmegaConf
 
 
-def find_model(cfg: dict) -> str:
+def _find_model(cfg: dict) -> str:
     candidates = [
         cfg.get("model_name_or_path", ""),
         "/newcpfs/user/yuanqianhao/hf_models/Qwen/Qwen2.5-7B-Instruct",
         "/newcpfs/user/gaochaochen/huimu/CodePrMP/models/Qwen2.5-7B-Instruct",
     ]
-    for path in candidates:
-        if path and Path(path).exists() and (Path(path) / "config.json").exists():
-            return path
+    for p in candidates:
+        if p and Path(p).exists() and (Path(p) / "config.json").exists():
+            return p
     raise FileNotFoundError("Base model not found. Set model_name_or_path in config.")
 
 
-def load_records(dataset_file: Path, builder, tokenizer, limit: int | None) -> dict:
-    records = []
-    with open(dataset_file) as f:
-        for line in f:
-            try:
-                d = json.loads(line)
-                if not d.get("prompt") or not d.get("arxiv_id"):
-                    continue
-                records.append(d)
-            except Exception:
-                pass
-            if limit and len(records) >= limit:
-                break
-
-    prompts, abstracts, arxiv_ids = [], [], []
-    for r in records:
-        messages = [
-            {"role": "system", "content": builder.system()},
-            {"role": "user",   "content": builder.build(r)},
-        ]
-        prompts.append(tokenizer.apply_chat_template(
-            messages, tokenize=False, add_generation_prompt=True
-        ))
-        abstracts.append(r.get("abstract", ""))
-        arxiv_ids.append(r["arxiv_id"])
-
-    return {"prompt": prompts, "abstract": abstracts, "arxiv_id": arxiv_ids}
-
-
-def build_trainer(algo: str, model, reward_funcs, args, dataset, tokenizer, peft_config):
-    if algo == "grpo":
-        from trl import GRPOTrainer
-        return GRPOTrainer(
-            model=model,
-            reward_funcs=reward_funcs,
-            args=args,
-            train_dataset=dataset,
-            processing_class=tokenizer,
-            peft_config=peft_config,
-        )
-    elif algo == "rloo":
-        from trl import RLOOTrainer
-        return RLOOTrainer(
-            model=model,
-            reward_funcs=reward_funcs,
-            args=args,
-            train_dataset=dataset,
-            processing_class=tokenizer,
-            peft_config=peft_config,
-        )
-    else:
-        raise ValueError(f"Unknown rl.algo: {algo!r}. Choose 'grpo' or 'rloo'.")
-
-
-def build_training_args(algo: str, rl: dict, reward_weights: list[float], output_dir: Path):
-    common = dict(
-        output_dir=str(output_dir),
-        num_train_epochs=rl.get("num_train_epochs", 1),
-        per_device_train_batch_size=rl.get("per_device_train_batch_size", 1),
-        gradient_accumulation_steps=rl.get("gradient_accumulation_steps", 4),
-        learning_rate=float(rl.get("learning_rate", 5e-6)),
-        lr_scheduler_type=rl.get("lr_scheduler_type", "cosine"),
-        warmup_ratio=float(rl.get("warmup_ratio", 0.05)),
-        max_completion_length=int(rl.get("max_completion_length", 2048)),
-        beta=float(rl.get("kl_coeff", 0.05)),
-        reward_weights=reward_weights,
-        scale_rewards=True,
-        logging_steps=rl.get("logging_steps", 5),
-        save_steps=rl.get("save_steps", 100),
-        save_total_limit=3,
-        bf16=rl.get("bf16", True),
-        report_to="none",
-        deepspeed=rl.get("deepspeed_config"),
-        logging_dir=str(output_dir / "logs"),
-    )
-    if algo == "grpo":
-        from trl import GRPOConfig
-        return GRPOConfig(num_generations=rl.get("num_generations", 8), **common)
-    else:
-        from trl import RLOOConfig
-        return RLOOConfig(rloo_k=rl.get("rloo_k", 4), **common)
+def _smoke_cfg(output_dir: str) -> dict:
+    """Minimal config for a 1-step smoke test — no config file required.
+    Output goes to /dev/shm (tmpfs, ~1.3T free) not /tmp (often 100% full)."""
+    base_runs = str(Path(_REPO_ROOT) / "runs")
+    model_path = _find_model({
+        "model_name_or_path": str(
+            Path(_REPO_ROOT) / "runs/model_cache"
+            / "models--Qwen--Qwen2.5-7B-Instruct"
+            / "snapshots/a09a35458c702b33eeacc393d103063234e8bc28"
+        ),
+    })
+    return {
+        "runs_dir": base_runs,
+        "model_name_or_path": model_path,
+        "fas": {"embed_model": "sentence-transformers/all-MiniLM-L6-v2"},
+        "rl": {
+            "algo": "grpo",
+            "finetune_mode": "full",
+            "sft_checkpoint": "",
+            "num_train_epochs": 1,
+            "per_device_train_batch_size": 1,
+            "gradient_accumulation_steps": 1,
+            "learning_rate": 5e-6,
+            "warmup_ratio": 0.05,
+            "max_completion_length": 2048,
+            "num_generations": 8,
+            "kl_coeff": 0.05,
+            "save_steps": 9999,
+            "reward_type": "prs",
+            "reward_antileak_threshold": 0.80,
+            "limit": 8,
+            "output_dir": output_dir,
+            "n_gpus": 8,
+        },
+    }
 
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--config", default="configs/base.yaml")
+    parser.add_argument("--config", default="configs/base.yaml",
+                        help="Experiment config YAML (ignored when --smoke is set)")
+    parser.add_argument("--smoke", action="store_true",
+                        help="Run a 1-step smoke test without a config file")
+    parser.add_argument("--output", default="/newcpfs/lxh/agentic-training/proposal_rl/runs/smoke_rl",
+                        help="Output dir for --smoke")
     parser.add_argument("--resume", action="store_true")
     args = parser.parse_args()
 
-    with open(args.config) as f:
-        cfg = yaml.safe_load(f)
-    rl       = cfg.get("rl", {})
-    fas_cfg  = cfg.get("fas", {})
+    if args.smoke:
+        cfg = _smoke_cfg(args.output)
+    else:
+        with open(args.config) as f:
+            cfg = yaml.safe_load(f)
+
+    rl = cfg.get("rl", {})
+    fas_cfg = cfg.get("fas", {})
     runs_dir = Path(cfg["runs_dir"])
 
     algo          = rl.get("algo", "grpo")
-    finetune_mode = rl.get("finetune_mode", "lora")
+    finetune_mode = rl.get("finetune_mode", "full")
     reward_type   = rl.get("reward_type", "prs")
     sft_ckpt      = Path(rl.get("sft_checkpoint") or str(runs_dir / "sft" / "final"))
     output_dir    = Path(rl["output_dir"]) if rl.get("output_dir") else runs_dir / "rl"
-    embed_model   = fas_cfg.get("embed_model", "sentence-transformers/all-MiniLM-L6-v2")
+    n_gpu         = int(os.environ.get("NGPU", rl.get("n_gpus", 8)))
 
-    log.info(f"algo={algo}  finetune_mode={finetune_mode}  reward={reward_type}")
+    dataset_file  = runs_dir / "dataset" / "train.jsonl"
+    # Use a limit-specific parquet name when --limit is set (e.g. smoke/mini runs),
+    # so that a limited rebuild never overwrites the canonical full-dataset parquet.
+    _limit = rl.get("limit")
+    if _limit:
+        parquet_file = runs_dir / "dataset" / f"train_{reward_type}_limit{_limit}.parquet"
+    else:
+        parquet_file = runs_dir / "dataset" / f"train_{reward_type}.parquet"
 
-    base_path = find_model(cfg)
-    tokenizer = AutoTokenizer.from_pretrained(base_path, trust_remote_code=True)
-    tokenizer.padding_side = "left"
-    if tokenizer.pad_token is None:
-        tokenizer.pad_token = tokenizer.eos_token
+    # Build Parquet if stale
+    if not parquet_file.exists() or parquet_file.stat().st_mtime < dataset_file.stat().st_mtime:
+        import subprocess
+        subprocess.run(
+            [
+                sys.executable, "train/make_parquet.py", "rl",
+                "--input", str(dataset_file),
+                "--output", str(parquet_file),
+                "--reward-type", reward_type,
+                "--config", args.config if not args.smoke else "configs/base.yaml",
+            ] + (["--limit", str(_limit)] if _limit else []),
+            cwd=_REPO_ROOT, check=True,
+        )
 
-    builder = get_builder(cfg)
-    log.info(f"Prompt builder: {type(builder).__name__}")
-
-    # Rollout logs go next to the output dir so per-experiment dashboards find them
-    rollout_log_dir = output_dir.parent / "logs"
-    rollout_log_dir.mkdir(parents=True, exist_ok=True)
-    rollout_log = str(rollout_log_dir /
-                      f"rollouts_rl_{datetime.datetime.now().strftime('%Y%m%d_%H%M%S')}.jsonl")
-
-    # Reward setup — diverges by reward_type
-    if reward_type == "prs":
-        init_encoder(embed_model, rollout_log_file=rollout_log)
-        reward_funcs = [reward_prs, reward_format]
-        reward_weights = [
-            rl.get("reward_prs_weight", 0.8),
-            rl.get("reward_format_weight", 0.2),
-        ]
-    elif reward_type == "fas":
-        fas_strategy = fas_cfg.get("strategy", "embedding")
+    # Set env vars consumed by train/verl_reward.py workers
+    embed_model = fas_cfg.get("embed_model", "sentence-transformers/all-MiniLM-L6-v2")
+    os.environ["EMBED_MODEL"] = embed_model
+    if reward_type == "fas":
         fas_index = str(runs_dir / "eval" / "val_index.npz")
-        log.info(f"FAS strategy: {fas_strategy}")
-        init_reward(
-            index_file=fas_index,
-            embed_model=embed_model,
-            topk=fas_cfg.get("topk", 50),
-            fas_weight=rl.get("reward_fas_weight", 0.6),
-            format_weight=rl.get("reward_format_weight", 0.2),
-            antileak_weight=rl.get("reward_antileak_weight", 0.2),
-            antileak_threshold=rl.get("reward_antileak_threshold", 0.80),
-            rollout_log_file=rollout_log,
-            strategy=fas_strategy,
-            judge_topk=fas_cfg.get("judge_topk", 5),
-            judge_model=fas_cfg.get("judge_model", "claude-sonnet-4-6"),
-        )
-        reward_funcs = [reward_fas, reward_format, reward_antileak]
-        reward_weights = [
-            rl.get("reward_fas_weight", 0.6),
-            rl.get("reward_format_weight", 0.2),
-            rl.get("reward_antileak_weight", 0.2),
-        ]
+        os.environ["FAS_INDEX_FILE"] = fas_index
+
+    base_model = _find_model(cfg)
+
+    # PPL reward uses the same base model as the actor for P_policy(abstract | proposal).
+    # Point reward workers at the SFT checkpoint (or base model if no SFT was run).
+    if reward_type == "ppl":
+        _ref_path = str(sft_ckpt) if (sft_ckpt / "config.json").exists() else base_model
+        os.environ["REF_MODEL_PATH"] = _ref_path
+
+    # verl PPO/GRPO config: start from the generated full config (has all defaults),
+    # then overlay our project-specific settings from verl_ppo.yaml.
+    import importlib.resources as _res
+    import verl.trainer.config as _vcfg_pkg
+    with _res.files(_vcfg_pkg).joinpath("_generated_ppo_trainer.yaml").open() as _f:
+        vcfg = OmegaConf.create(_f.read())
+    verl_cfg_path = Path(_REPO_ROOT) / "configs" / "verl_ppo.yaml"
+    vcfg = OmegaConf.merge(vcfg, OmegaConf.load(str(verl_cfg_path)))
+
+    use_grpo = (algo == "grpo")
+    actor_lr = float(rl.get("learning_rate", 5e-6))
+
+    # 4×H800 80GB OOM profile for RL (FSDP actor + vLLM rollout, no flash-attn):
+    # full-FT actor update at max_token_len=16384 OOMs. Fixes: gradient checkpointing
+    # + reduced token budget + lower vLLM memory utilization when n_gpu < 8.
+    tight_memory = n_gpu < 8
+    rl_grad_ckpt = rl.get("gradient_checkpointing", False) or tight_memory
+    max_prompt_len = 3072 if tight_memory else 4096
+    max_resp_len = int(rl.get("max_completion_length", 2048))
+    ppo_max_token = 8192 if tight_memory else 16384
+    # LoRA weight update spikes GPU0 by ~16GB on top of steady-state allocations:
+    # vLLM 35.5 GB + FSDP actor 8.5 GB + FSDP ref 5.7 GB + LoRA update spike ~16 GB
+    # = ~65.7 GB steady-state + spike overhead → OOM at step 1041 on 79.11 GB H800.
+    # Use 0.35 for LoRA (reserves ~7.9 GB more vs 0.45) to survive weight-update spikes.
+    is_lora_rl = (finetune_mode == "lora")
+    if tight_memory:
+        vllm_gpu_util = 0.35 if is_lora_rl else 0.45
     else:
-        raise ValueError(f"Unknown rl.reward_type: {reward_type!r}. Choose 'prs' or 'fas'.")
+        vllm_gpu_util = 0.6
+    # CUDA graph capture adds ~28GB overhead on top of KV cache on 80GB H800.
+    # With vllm_gpu_util=0.45 (~35GB KV) + graphs (~28GB) + FSDP init, GPU 0 OOMs
+    # before the ref model can be cast (torch.nn.Module.convert() crash).
+    # Disable graph capture for tight-memory runs — eager mode uses ~35GB total.
+    vllm_enforce_eager = tight_memory
 
-    log.info(f"Rollout log → {rollout_log}")
+    overrides = OmegaConf.create({
+        "data": {
+            "train_files": str(parquet_file),
+            "val_files":   str(parquet_file),
+            "train_batch_size":   n_gpu * rl.get("per_device_train_batch_size", 1)
+                                  * rl.get("gradient_accumulation_steps", 1),
+            "max_prompt_length":  max_prompt_len,
+            "max_response_length": max_resp_len,
+            "return_raw_chat":    True,
+        },
+        "actor_rollout_ref": {
+            "model": {
+                "path": str(sft_ckpt) if (sft_ckpt / "config.json").exists() else base_model,
+                "lora_rank": rl.get("lora_r", 0) if finetune_mode == "lora" else 0,
+                "lora_alpha": rl.get("lora_alpha", 128),
+                "enable_gradient_checkpointing": rl_grad_ckpt,
+                "override_config": {"attn_implementation": "sdpa"},
+            },
+            "actor": {
+                "optim": {
+                    "lr": actor_lr,
+                    "lr_warmup_steps_ratio": float(rl.get("warmup_ratio", 0.05)),
+                },
+                "ppo_mini_batch_size": n_gpu * rl.get("per_device_train_batch_size", 1),
+                "ppo_micro_batch_size_per_gpu": rl.get("per_device_train_batch_size", 1),
+                "ppo_max_token_len_per_gpu": ppo_max_token,
+                "use_kl_loss": True,
+                "kl_loss_coef": float(rl.get("kl_coeff", 0.05)),
+                "clip_ratio": 0.2,
+                "rollout_n": int(rl.get("num_generations", 8)),
+            },
+            "rollout": {
+                "n": int(rl.get("num_generations", 8)),
+                "tensor_model_parallel_size": 1,
+                "gpu_memory_utilization": vllm_gpu_util,
+                "enforce_eager": vllm_enforce_eager,
+                "max_num_batched_tokens": ppo_max_token,
+                # PPL reward: each AgentLoopWorker loads a full 7B model into CPU RAM.
+                # 8 workers × ~120 GB = ~960 GB → OOM. Limit to 1 agent worker.
+                **({"agent": {"num_workers": 1}} if reward_type == "ppl" else {}),
+            },
+            "ref": {
+                "log_prob_micro_batch_size_per_gpu": rl.get("per_device_train_batch_size", 1),
+                "fsdp_config": {"param_offload": False},
+            },
+        },
+        "algorithm": {
+            "adv_estimator": "grpo" if use_grpo else "reinforce_plus_plus",
+            "use_kl_in_reward": False,
+            "kl_ctrl": {"kl_coef": float(rl.get("kl_coeff", 0.05))},
+        },
+        "reward": {
+            "custom_reward_function": {
+                "path": str(Path(_REPO_ROOT) / "train" / "verl_reward.py"),
+                "name": "compute_score",
+                "reward_kwargs": {
+                    "antileak_threshold": float(rl.get("reward_antileak_threshold", 0.80)),
+                },
+            },
+            # PPL reward loads a 7B model per worker — keep to 1 to avoid
+            # 4 independent model copies flooding CPU RAM (~230 GB each).
+            **({"num_workers": 1} if reward_type == "ppl" else {}),
+        },
+        "trainer": {
+            "default_local_dir": str(output_dir),
+            "total_epochs": int(rl.get("num_train_epochs", 1)),
+            "save_freq":    int(rl.get("save_steps", 100)),
+            "n_gpus_per_node": n_gpu,
+            "logger": ["console"],
+            "resume_mode": "auto" if args.resume else "disable",
+        },
+        "ray_kwargs": {
+            "ray_init": {
+                "num_cpus": max(n_gpu * 4, 32),
+                # Ray sockets/IPC must be on a local filesystem — NFS (e.g. /newcpfs)
+                # does not support Unix domain sockets (EOPNOTSUPP).
+                "_temp_dir": "/dev/shm/ray_tmp",
+                # PPL: cap object store so the default 200 GB reservation doesn't leave
+                # insufficient headroom for the 7B reward model loaded on CPU.
+                # Rollout batches are tiny (8 samples × 2048 tokens), 20 GB is ample.
+                **({"object_store_memory": 20 * 1024 ** 3} if reward_type == "ppl" else {}),
+            },
+        },
+    })
 
-    # Dataset
-    dataset_file = runs_dir / "dataset" / "train.jsonl"
-    hf_data = load_records(dataset_file, builder, tokenizer, rl.get("limit"))
-    dataset = Dataset.from_dict(hf_data)
-    log.info(f"Loaded {len(dataset)} training examples")
+    vcfg = OmegaConf.merge(vcfg, overrides)
 
-    # LoRA config
-    peft_config = None
-    if finetune_mode == "lora":
-        peft_config = LoraConfig(
-            task_type=TaskType.CAUSAL_LM,
-            r=rl.get("lora_r", 64),
-            lora_alpha=rl.get("lora_alpha", 128),
-            target_modules=rl.get("lora_target_modules",
-                                  ["q_proj", "k_proj", "v_proj", "o_proj",
-                                   "gate_proj", "up_proj", "down_proj"]),
-            lora_dropout=rl.get("lora_dropout", 0.05),
-            bias="none",
-        )
+    # Save merged config for reproducibility
+    output_dir.mkdir(parents=True, exist_ok=True)
+    with open(output_dir / "verl_config.yaml", "w") as f:
+        f.write(OmegaConf.to_yaml(vcfg))
 
-    training_args = build_training_args(algo, rl, reward_weights, output_dir)
+    # Pre-download sentence-transformers before Ray workers start to avoid
+    # concurrent HF cache writes causing "Unrecognized model" errors.
+    from sentence_transformers import SentenceTransformer as _ST
+    _ST(embed_model)
+    del _ST
 
-    _sft_is_lora = sft_ckpt.exists() and (sft_ckpt / "adapter_config.json").exists()
-    _sft_is_full = sft_ckpt.exists() and not _sft_is_lora
+    # Pre-initialize CUDA before Ray forks workers to avoid glibc 2.28 TLS
+    # assertion failures (_dl_allocate_tls_init: listp != NULL).
+    import torch
+    if torch.cuda.is_available():
+        torch.ones(1, device="cuda:0")
 
-    if _sft_is_lora:
-        log.info(f"Loading base model: {base_path}")
-        model = AutoModelForCausalLM.from_pretrained(
-            base_path, torch_dtype=torch.bfloat16, trust_remote_code=True, use_cache=False,
-        )
-        log.info(f"Loading SFT LoRA adapter: {sft_ckpt}")
-        model = PeftModel.from_pretrained(model, str(sft_ckpt), is_trainable=True)
-    elif _sft_is_full:
-        log.info(f"Loading full SFT model as base: {sft_ckpt}")
-        model = AutoModelForCausalLM.from_pretrained(
-            str(sft_ckpt), torch_dtype=torch.bfloat16, trust_remote_code=True, use_cache=False,
-        )
-    else:
-        log.warning(f"SFT checkpoint not found at {sft_ckpt}, starting from base model")
-        model = AutoModelForCausalLM.from_pretrained(
-            base_path, torch_dtype=torch.bfloat16, trust_remote_code=True, use_cache=False,
-        )
+    # Clear inductor cache to avoid UnpicklingError from truncated files left
+    # by a previous run killed mid-write (e.g. disk-full crash).
+    _inductor_cache = os.environ["TORCHINDUCTOR_CACHE_DIR"]
+    shutil.rmtree(_inductor_cache, ignore_errors=True)
+    Path(_inductor_cache).mkdir(parents=True, exist_ok=True)
 
-    trainer = build_trainer(
-        algo, model, reward_funcs, training_args, dataset, tokenizer,
-        peft_config if not _sft_is_lora else None,
-    )
+    # Launch verl PPO/GRPO trainer
+    from verl.trainer.main_ppo import run_ppo
+    run_ppo(vcfg)
 
-    log.info(f"Starting {algo.upper()} training...")
-    trainer.train(resume_from_checkpoint=args.resume)
-    trainer.save_model(str(output_dir / "final"))
-    tokenizer.save_pretrained(str(output_dir / "final"))
-    log.info("RL training complete.")
+    # Merge sharded FSDP checkpoint → HF model at output_dir/final
+    final_dir = output_dir / "final"
+    # Check for the merged weights, not just the directory (a failed previous
+    # attempt may have created an empty final/ directory).
+    if not (final_dir / "config.json").exists():
+        ckpt_dirs = sorted(output_dir.glob("global_step_*"))
+        if ckpt_dirs:
+            last_ckpt = ckpt_dirs[-1]
+            # verl saves FSDP shards under global_step_N/actor/, not directly
+            # under global_step_N/.  The merger's --local_dir must point at the
+            # actor subdirectory where the rank shards live.
+            actor_dir = last_ckpt / "actor"
+            hf_subdir = actor_dir / "huggingface"
+            if not (hf_subdir / "config.json").exists():
+                hf_subdir.mkdir(parents=True, exist_ok=True)
+                _config_src = (
+                    sft_ckpt if (sft_ckpt / "config.json").exists() else Path(base_model)
+                )
+                for _f in _config_src.glob("*.json"):
+                    shutil.copy2(_f, hf_subdir / _f.name)
+                for _f in _config_src.glob("*.model"):
+                    shutil.copy2(_f, hf_subdir / _f.name)
+                for _f in _config_src.glob("tokenizer*"):
+                    shutil.copy2(_f, hf_subdir / _f.name)
+            import subprocess
+            final_dir.mkdir(parents=True, exist_ok=True)
+            subprocess.run(
+                [
+                    sys.executable, "-m", "verl.model_merger", "merge",
+                    "--backend", "fsdp",
+                    "--local_dir", str(actor_dir),
+                    "--target_dir", str(final_dir),
+                ],
+                cwd=_REPO_ROOT, check=False,
+            )
 
 
 if __name__ == "__main__":

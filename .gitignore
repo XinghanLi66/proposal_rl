@@ -51,6 +51,13 @@ runs/rl/
 runs/eval/
 runs/exps/
 runs/logs/
+runs/benchmark/
+runs/demo_saves/
+runs/dlc_cmds/
+runs/dlc_jobs.json
+runs/ray_tmp/
+runs/smoke_rl/
+runs/smoke_sft/
 
 # Keep the small pipeline orchestration scripts in runs/
 !runs/_pipeline.sh
@@ -71,3 +78,8 @@ venv/
 # ── Misc generated ────────────────────────────────────────────────────────────
 .best_hparams
 hparam_search.json
+
+# ── Local/DLC operations helpers with workspace-specific details ─────────────
+scripts/dlc_reruns/
+scripts/coord_exp09_15_17.sh
+scripts/find_best_quota.py
