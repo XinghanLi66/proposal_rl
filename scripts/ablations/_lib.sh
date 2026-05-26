@@ -159,13 +159,8 @@ run_one_mini() {
                "rl.output_dir=${mini_out}" \
                "rl.limit=${HP_LIMIT}"
 
-    # Run (don't abort on non-zero — log the error and continue)
-    local mini_port
-    mini_port=$(_free_port)
-    $TORCHRUN_CMD \
-        --nproc_per_node "$NGPU" \
-        --master_port "$mini_port" \
-        train/rl.py --config "$mini_cfg" \
+    # verl RL uses Ray (single-process launcher — Ray spawns workers internally)
+    NGPU="$NGPU" $PY train/rl.py --config "$mini_cfg" \
         2>&1 | tee "$mini_log" || \
         echo "[${EXP_NAME}] WARNING: mini-run lr=${lr} kl=${kl} exited non-zero"
 
@@ -221,12 +216,8 @@ run_full_training() {
                "rl.kl_coeff=${BEST_KL}" \
                "rl.output_dir=${EXP_DIR}/rl"
 
-    local full_port
-    full_port=$(_free_port)
-    $TORCHRUN_CMD \
-        --nproc_per_node "$NGPU" \
-        --master_port "$full_port" \
-        train/rl.py --config "$full_cfg" \
+    # verl RL uses Ray (single-process launcher)
+    NGPU="$NGPU" $PY train/rl.py --config "$full_cfg" \
         2>&1 | tee "$log" \
         && echo "[${EXP_NAME}] Training done → ${EXP_DIR}/rl/final" \
         || echo "[${EXP_NAME}] ERROR: full training exited non-zero — check $log"

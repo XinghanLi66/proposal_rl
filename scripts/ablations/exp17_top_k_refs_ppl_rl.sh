@@ -1,35 +1,30 @@
 #!/usr/bin/env bash
 # ─────────────────────────────────────────────────────────────────────────────
-# Exp 15 — top_k_refs, full-FT, FAS reward, RL-only from exp09 SFT ckpt
-#   Mirrors exp07 (FAS RL) but starts from the exp09 top_k_refs SFT checkpoint
-#   instead of the shared full_refs SFT, isolating prompt-format alignment.
+# Exp 17 — top_k_refs, full-FT, PPL reward, RL-only from exp09 SFT ckpt
+#   Ablates reward signal: replaces PRS cosine-similarity with perplexity of
+#   the source abstract under the policy model (mean log P(abstract | prompt,
+#   proposal)).  Everything else mirrors exp09.
 #   prompt strategy : top_k_refs
 #   finetune mode   : full
-#   reward          : FAS
+#   reward          : ppl  (mean log-prob of source abstract under policy)
 #   SFT init        : latest exp09 SFT final checkpoint (auto-detected)
 # ─────────────────────────────────────────────────────────────────────────────
 set -euo pipefail
 
-EXP_NAME="exp15_fas_from_exp09_sft"
-EXP_LABEL="top-k-refs FAS RL (exp09 SFT init)"
+EXP_NAME="exp17_top_k_refs_ppl_rl"
+EXP_LABEL="top-k-refs PPL RL (exp09 SFT init)"
 STRATEGY="top_k_refs"
 FINETUNE_MODE="full"
-REWARD_TYPE="fas"
+REWARD_TYPE="ppl"
 EXTRA_OVERRIDES=""
 
-# ── Locate exp09 SFT checkpoint (most recent complete run) ───────────────────
+# ── Locate exp09 SFT checkpoint (most recent run) ────────────────────────────
 _REPO=/newcpfs/lxh/agentic-training/proposal_rl
-_EXP09_CKPT=""
-for _d in $(ls -d "${_REPO}/runs/exps/exp09_top_k_refs_sft_rl_"*/sft/final \
-            2>/dev/null | sort -r); do
-    if [[ -f "${_d}/model.safetensors" ]]; then
-        _EXP09_CKPT="$_d"
-        break
-    fi
-done
+_EXP09_CKPT=$(ls -d "${_REPO}/runs/exps/exp09_top_k_refs_sft_rl_"*/sft/final \
+              2>/dev/null | sort | tail -1)
 
 if [[ -z "$_EXP09_CKPT" ]]; then
-    echo "[${EXP_NAME}] ERROR: No complete exp09 SFT checkpoint (with model.safetensors) found under"
+    echo "[${EXP_NAME}] ERROR: No exp09 SFT checkpoint found under"
     echo "  ${_REPO}/runs/exps/exp09_top_k_refs_sft_rl_*/sft/final"
     echo "  Please run exp09 first, or set SFT_CKPT_OVERRIDE manually."
     exit 1

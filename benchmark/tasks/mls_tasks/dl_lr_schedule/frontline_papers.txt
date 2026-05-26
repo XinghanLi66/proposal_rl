@@ -1,0 +1,9 @@
+# Frontline papers for dl-lr-schedule task.
+# These are the papers behind the reference baselines (warmup_cosine, cosine, one_cycle).
+# Their combined reference lists form the prompt for the proposal model.
+# Goyal et al. 2017 - Accurate Large Minibatch SGD (warmup-cosine)
+1706.02677
+# Loshchilov & Hutter 2017 - SGDR: Stochastic Gradient Descent with Warm Restarts (cosine)
+1608.03983
+# Smith & Topin 2018 - Super-Convergence: Very Fast Training via Large Learning Rates (one_cycle)
+1708.07120

@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# SFT training on 8 GPUs with DeepSpeed ZeRO-2.
+# SFT training via verl FSDP (torchrun, no DeepSpeed).
 set -euo pipefail
 
 REPO=/newcpfs/lxh/agentic-training/proposal_rl
@@ -10,7 +10,7 @@ LOG_DIR=runs/logs
 mkdir -p "$LOG_DIR"
 LOG="$LOG_DIR/sft_$(date +%Y%m%d_%H%M%S).log"
 
-echo "[sft] ngpu=$NGPU → $LOG"
+echo "[sft] ngpu=$NGPU  backend=verl-fsdp → $LOG"
 
 conda run -n loongflow_ml --no-capture-output \
   torchrun \

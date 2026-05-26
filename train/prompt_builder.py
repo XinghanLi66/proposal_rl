@@ -89,9 +89,11 @@ The researcher has identified the following open question as their primary motiv
 """ + _PROPOSAL_FORMAT
 
 
-def _ref_entry(idx: int, ref: dict, abstract_chars: int = 400) -> str:
+def _ref_entry(idx: int, ref: dict, abstract_chars: int | None = 400, summarizer=None) -> str:
     abstract = (ref.get("abstract") or "").strip()
-    if len(abstract) > abstract_chars:
+    if summarizer is not None:
+        abstract = summarizer.summarize(ref)
+    elif abstract_chars is not None and len(abstract) > abstract_chars:
         abstract = abstract[:abstract_chars] + "..."
     return (
         f"[{idx}] {ref.get('title', 'Unknown')} ({ref.get('year') or 'n.d.'})\n"
@@ -188,6 +190,64 @@ class _Cache:
                 fcntl.flock(f, fcntl.LOCK_UN)
 
 
+# ── Abstract summarizer (LLM-generated concise summary, cached) ───────────────
+
+class AbstractSummarizer:
+    """
+    Generates a <400-char concise summary of a ref abstract via Claude,
+    highlighting the problem addressed and the method used.
+
+    Used by full-ref strategies (full_refs, related_work, with_research_question)
+    where up to 40 refs appear in the prompt.  Results are cached to disk keyed
+    by an MD5 of the abstract text so refs without arxiv_ids are handled too.
+    Abstracts already ≤ 400 chars are returned as-is without an API call.
+    """
+
+    _PROMPT = """\
+Summarize the following research paper abstract in under 400 characters.
+Capture only: (1) the core problem addressed, (2) the method or approach used.
+Be dense and precise. No filler phrases. Output only the summary.
+
+Abstract: {abstract}
+
+Summary:"""
+
+    def __init__(self, cfg: dict) -> None:
+        self.model = cfg.get("model", _DEFAULT_MODEL)
+        runs_dir = cfg.get("runs_dir", ".")
+        self._cache = _Cache(
+            Path(runs_dir) / "dataset" / "prompt_cache" / "abstract_summary.jsonl"
+        )
+        self._client = None
+
+    def _client_(self):
+        if self._client is None:
+            self._client = _claude_client()
+        return self._client
+
+    def summarize(self, ref: dict) -> str:
+        abstract = (ref.get("abstract") or "").strip()
+        if not abstract:
+            return "(no abstract available)"
+        if len(abstract) <= 400:
+            return abstract
+        import hashlib
+        cache_key = hashlib.md5(abstract.encode()).hexdigest()
+        cached = self._cache.get(cache_key)
+        if cached is not None:
+            return cached
+        prompt = self._PROMPT.format(abstract=abstract[:3000])
+        try:
+            text = _call_claude(self._client_(), self.model, prompt, max_tokens=120)
+            if len(text) > 400:
+                text = text[:397] + "..."
+            self._cache.set(cache_key, text)
+            return text
+        except Exception as exc:
+            log.warning("AbstractSummarizer: LLM call failed (%s), truncating", exc)
+            return abstract[:397] + "..."
+
+
 # ── Base class ────────────────────────────────────────────────────────────────
 
 class PromptBuilder(ABC):
@@ -205,19 +265,29 @@ class PromptBuilder(ABC):
 # ── FullRefsBuilder ───────────────────────────────────────────────────────────
 
 class FullRefsBuilder(PromptBuilder):
-    """All resolved references, shuffled and truncated to max_refs. (default)"""
+    """All resolved references, shuffled and truncated to max_refs. (default)
+
+    If the record has a ``pinned_count`` field, the first N refs are kept
+    verbatim at the top; only the remainder is shuffled and truncated.
+    """
 
     def __init__(self, cfg: dict) -> None:
         super().__init__(cfg)
         self.seed = cfg.get("shuffle_seed", 42)
-        self.abstract_chars = cfg.get("abstract_chars", 400)
+        self._summarizer = AbstractSummarizer(cfg)
 
     def build(self, record: dict) -> str:
         refs = list(record.get("refs", []))
-        random.Random(self.seed).shuffle(refs)
-        refs = refs[: self.max_refs]
-        ref_block = "\n\n".join(_ref_entry(i + 1, r, self.abstract_chars) for i, r in enumerate(refs))
-        return USER_TEMPLATE.format(n_refs=len(refs), ref_block=ref_block)
+        pinned = min(record.get("pinned_count", 0), len(refs))
+        pinned_refs = refs[:pinned]
+        rest = refs[pinned:]
+        random.Random(self.seed).shuffle(rest)
+        rest = rest[: max(0, self.max_refs - pinned)]
+        selected = pinned_refs + rest
+        ref_block = "\n\n".join(
+            _ref_entry(i + 1, r, summarizer=self._summarizer) for i, r in enumerate(selected)
+        )
+        return USER_TEMPLATE.format(n_refs=len(selected), ref_block=ref_block)
 
 
 # ── TopKRefsBuilder ───────────────────────────────────────────────────────────
@@ -244,7 +314,9 @@ Reply with ONLY a comma-separated list of exactly {k} 1-based indices, e.g.: 3,7
         self.k = cfg.get("top_k", 5)
         self.model = cfg.get("model", _DEFAULT_MODEL)
         runs_dir = cfg.get("runs_dir", ".")
-        cache_file = Path(runs_dir) / "dataset" / "prompt_cache" / f"top_k_{self.k}.jsonl"
+        # Share the index cache with TopKRelatedWorkBuilder — same selection prompt,
+        # same LLM, no reason to run selection twice.
+        cache_file = Path(runs_dir) / "dataset" / "prompt_cache" / f"top_k_{self.k}_index.jsonl"
         self._cache = _Cache(cache_file)
         self._client = None
 
@@ -259,15 +331,21 @@ Reply with ONLY a comma-separated list of exactly {k} 1-based indices, e.g.: 3,7
             return USER_TEMPLATE.format(n_refs=0, ref_block="(no references)")
 
         arxiv_id = record.get("arxiv_id", "")
-        cached = self._cache.get(arxiv_id) if arxiv_id else None
+        pinned = min(record.get("pinned_count", 0), len(refs))
+        pinned_refs = refs[:pinned]
+        rest = refs[pinned:]
 
+        cached = self._cache.get(arxiv_id) if arxiv_id else None
         if cached is not None:
             indices = json.loads(cached)
         else:
-            indices = self._select_indices(refs, arxiv_id)
+            # Select k from the non-pinned refs so frontlines don't occupy LLM slots
+            indices = self._select_indices(rest, arxiv_id)
 
-        selected = [refs[i] for i in indices if i < len(refs)]
-        ref_block = "\n\n".join(_ref_entry(i + 1, r) for i, r in enumerate(selected))
+        selected_rest = [rest[i] for i in indices if i < len(rest)]
+        selected = pinned_refs + selected_rest
+        # k ≤ 5 selected (plus pinned): use full abstracts — no truncation
+        ref_block = "\n\n".join(_ref_entry(i + 1, r, abstract_chars=None) for i, r in enumerate(selected))
         return USER_TEMPLATE.format(n_refs=len(selected), ref_block=ref_block)
 
     def _select_indices(self, refs: list[dict], arxiv_id: str) -> list[int]:
@@ -313,9 +391,9 @@ Write the related work section:"""
         super().__init__(cfg)
         self.model = cfg.get("model", _DEFAULT_MODEL)
         runs_dir = cfg.get("runs_dir", ".")
-        self._cache = _Cache(
-            Path(runs_dir) / "dataset" / "prompt_cache" / "related_work.jsonl"
-        )
+        cache_dir = Path(runs_dir) / "dataset" / "prompt_cache"
+        self._annotated_cache = _Cache(cache_dir / "related_work_annotated.jsonl")
+        self._summarizer = AbstractSummarizer(cfg)
         self._client = None
 
     def _client_(self):
@@ -329,27 +407,46 @@ Write the related work section:"""
             return USER_TEMPLATE.format(n_refs=0, ref_block="(no references)")
 
         arxiv_id = record.get("arxiv_id", "")
-        related_work = self._cache.get(arxiv_id) if arxiv_id else None
 
-        if related_work is None:
-            related_work = self._synthesize(refs, arxiv_id)
+        cached = self._annotated_cache.get(arxiv_id) if arxiv_id else None
+        if cached is not None:
+            return RELATED_WORK_TEMPLATE.format(related_work=cached)
 
-        return RELATED_WORK_TEMPLATE.format(related_work=related_work)
+        narrative = self._synthesize(refs, arxiv_id)
+
+        # Title list covers ALL refs so the model can resolve every citation.
+        title_block = "\n".join(
+            f"[{i + 1}] {r.get('title', 'Unknown')}"
+            for i, r in enumerate(refs)
+        )
+
+        if narrative is None:
+            # Synthesis failed — return plain ref list without caching (retryable).
+            ref_block = "\n\n".join(
+                _ref_entry(i + 1, r) for i, r in enumerate(refs)
+            )
+            fallback = ref_block + "\n\n**References:**\n" + title_block
+            return RELATED_WORK_TEMPLATE.format(related_work=fallback)
+
+        annotated = narrative + "\n\n**References:**\n" + title_block
+        if arxiv_id:
+            self._annotated_cache.set(arxiv_id, annotated)
+
+        return RELATED_WORK_TEMPLATE.format(related_work=annotated)
 
     def _synthesize(self, refs: list[dict], arxiv_id: str) -> str:
-        truncated = refs[: self.max_refs]
-        ref_block = "\n\n".join(_ref_entry(i + 1, r) for i, r in enumerate(truncated))
-        prompt = self._SYNTHESIS_PROMPT.format(n=len(truncated), ref_block=ref_block)
-        log.info("related_work: synthesizing %s (%d refs)", arxiv_id or "?", len(truncated))
+        # Synthesize from all refs so the narrative covers the same papers as the title list.
+        ref_block = "\n\n".join(
+            _ref_entry(i + 1, r) for i, r in enumerate(refs)
+        )
+        prompt = self._SYNTHESIS_PROMPT.format(n=len(refs), ref_block=ref_block)
+        log.info("related_work: synthesizing %s (%d refs)", arxiv_id or "?", len(refs))
         try:
             text = _call_claude(self._client_(), self.model, prompt, max_tokens=1024)
-            if arxiv_id:  # only cache on success
-                self._cache.set(arxiv_id, text)
             return text
         except Exception as exc:
             log.warning("RelatedWorkBuilder: LLM call failed (%s), falling back to numbered ref list", exc)
-            # Fallback: numbered list with abstracts — coherent and keeps the template intact
-            return ref_block
+            return None
 
 
 # ── WithResearchQuestionBuilder ───────────────────────────────────────────────
@@ -378,6 +475,7 @@ State the research question in 1-3 sentences. Be specific and forward-looking:""
         self._cache = _Cache(
             Path(runs_dir) / "dataset" / "prompt_cache" / "research_question.jsonl"
         )
+        self._summarizer = AbstractSummarizer(cfg)
         self._client = None
 
     def _client_(self):
@@ -391,17 +489,24 @@ State the research question in 1-3 sentences. Be specific and forward-looking:""
             return USER_TEMPLATE.format(n_refs=0, ref_block="(no references)")
 
         arxiv_id = record.get("arxiv_id", "")
-        research_question = self._cache.get(arxiv_id) if arxiv_id else None
+        pinned = min(record.get("pinned_count", 0), len(refs))
+        pinned_refs = refs[:pinned]
+        rest = refs[pinned:]
 
+        # Generate the research question from the full list (including frontlines)
+        research_question = self._cache.get(arxiv_id) if arxiv_id else None
         if research_question is None:
             research_question = self._generate_question(refs, arxiv_id)
 
-        # Build the standard ref block alongside the question
-        random.Random(42).shuffle(refs)
-        truncated = refs[: self.max_refs]
-        ref_block = "\n\n".join(_ref_entry(i + 1, r) for i, r in enumerate(truncated))
+        # Build the ref block: pinned first (in order), then shuffle + truncate rest
+        random.Random(42).shuffle(rest)
+        rest = rest[: max(0, self.max_refs - pinned)]
+        selected = pinned_refs + rest
+        ref_block = "\n\n".join(
+            _ref_entry(i + 1, r, summarizer=self._summarizer) for i, r in enumerate(selected)
+        )
         return WITH_QUESTION_TEMPLATE.format(
-            n_refs=len(truncated),
+            n_refs=len(selected),
             ref_block=ref_block,
             research_question=research_question,
         )
@@ -429,7 +534,12 @@ class TopKRelatedWorkBuilder(PromptBuilder):
       1. LLM selects the top-K most important references (like TopKRefsBuilder).
       2. LLM synthesizes a related-work narrative from just those K refs (like RelatedWorkBuilder).
 
-    Caches both the index selection and the resulting narrative, keyed by arxiv_id.
+    New cache layout (independent of legacy top_k_{k}.jsonl / top_k_related_work.jsonl):
+      top_k_{k}_index.jsonl        — JSON list of 0-based indices selected per arxiv_id
+      top_k_{k}_related_work.jsonl — final annotated prompt (narrative + title list) per arxiv_id
+
+    Storing the complete annotated output in the cache guarantees that the title list
+    appended to the narrative always matches the indices actually used during synthesis.
     """
 
     _SELECT_PROMPT = TopKRefsBuilder._SELECT_PROMPT
@@ -442,8 +552,10 @@ class TopKRelatedWorkBuilder(PromptBuilder):
         self.model = cfg.get("model", _DEFAULT_MODEL)
         runs_dir = cfg.get("runs_dir", ".")
         cache_dir = Path(runs_dir) / "dataset" / "prompt_cache"
-        self._idx_cache = _Cache(cache_dir / f"top_k_{self.k}.jsonl")
-        self._rw_cache  = _Cache(cache_dir / "top_k_related_work.jsonl")
+        # New, independent cache files — do not touch legacy top_k_{k}.jsonl or
+        # top_k_related_work.jsonl so old experiments are unaffected.
+        self._idx_cache = _Cache(cache_dir / f"top_k_{self.k}_index.jsonl")
+        self._rw_cache  = _Cache(cache_dir / f"top_k_{self.k}_related_work.jsonl")
         self._client = None
 
     def _client_(self):
@@ -457,24 +569,51 @@ class TopKRelatedWorkBuilder(PromptBuilder):
             return USER_TEMPLATE.format(n_refs=0, ref_block="(no references)")
 
         arxiv_id = record.get("arxiv_id", "")
+        pinned = min(record.get("pinned_count", 0), len(refs))
+        pinned_refs = refs[:pinned]
+        rest = refs[pinned:]
 
-        # Stage 1: top-K index selection
+        # Stage 2 cache stores the complete annotated output — check it first so
+        # we can skip re-synthesis even if indices happen not to be cached yet.
+        cached_prompt = self._rw_cache.get(arxiv_id) if arxiv_id else None
+        if cached_prompt is not None:
+            return RELATED_WORK_TEMPLATE.format(related_work=cached_prompt)
+
+        # Stage 1: top-K index selection from non-pinned refs only
         cached_idx = self._idx_cache.get(arxiv_id) if arxiv_id else None
         if cached_idx is not None:
             indices = json.loads(cached_idx)
         else:
-            indices = self._select_indices(refs, arxiv_id)
-        selected = [refs[i] for i in indices if i < len(refs)]
+            indices = self._select_indices(rest, arxiv_id)
+        selected_rest = [rest[i] for i in indices if i < len(rest)]
+        selected = pinned_refs + selected_rest
 
-        # Stage 2: narrative synthesis from selected refs
-        cache_key = arxiv_id + f"_topk{self.k}" if arxiv_id else ""
-        related_work = self._rw_cache.get(cache_key) if cache_key else None
+        # Stage 2: narrative synthesis from pinned + selected refs
+        related_work = self._synthesize(selected)
+
+        title_block = "\n".join(
+            f"[{i + 1}] {r.get('title', 'Unknown')}"
+            for i, r in enumerate(selected)
+        )
+
         if related_work is None:
-            related_work = self._synthesize(selected, cache_key)
+            # Synthesis failed — return plain ref list without caching so the
+            # record can be retried on the next re-synthesis pass.
+            ref_block = "\n\n".join(
+                _ref_entry(i + 1, r, abstract_chars=None) for i, r in enumerate(selected)
+            )
+            fallback = ref_block + "\n\n**References:**\n" + title_block
+            return RELATED_WORK_TEMPLATE.format(related_work=fallback)
 
-        return RELATED_WORK_TEMPLATE.format(related_work=related_work)
+        # Build the annotated block (narrative + title list) and cache it whole.
+        annotated = related_work + "\n\n**References:**\n" + title_block
+        if arxiv_id:
+            self._rw_cache.set(arxiv_id, annotated)
+
+        return RELATED_WORK_TEMPLATE.format(related_work=annotated)
 
     def _select_indices(self, refs: list[dict], arxiv_id: str) -> list[int]:
+        # refs is already the non-pinned subset; indices are relative to it
         k = min(self.k, len(refs))
         truncated = refs[: self.max_refs]
         prompt = self._SELECT_PROMPT.format(k=k, compact_list=_compact_ref_list(truncated))
@@ -484,25 +623,22 @@ class TopKRelatedWorkBuilder(PromptBuilder):
             indices = [i - 1 for i in raw if 1 <= i <= len(truncated)][:k]
             if not indices:
                 raise ValueError(f"no valid indices in response: {text!r}")
-            if arxiv_id:  # only cache on success
+            if arxiv_id:
                 self._idx_cache.set(arxiv_id, json.dumps(indices))
         except Exception as exc:
             log.warning(f"TopKRelatedWorkBuilder: selection failed ({exc}), using first {k} refs")
             indices = list(range(k))
         return indices
 
-    def _synthesize(self, refs: list[dict], cache_key: str) -> str:
-        ref_block = "\n\n".join(_ref_entry(i + 1, r) for i, r in enumerate(refs))
+    def _synthesize(self, refs: list[dict]) -> str | None:
+        # k ≤ 5 selected refs: use full abstracts — no truncation
+        ref_block = "\n\n".join(_ref_entry(i + 1, r, abstract_chars=None) for i, r in enumerate(refs))
         prompt = self._SYNTHESIS_PROMPT.format(n=len(refs), ref_block=ref_block)
-        log.info("top_k_related_work: synthesizing %s (%d refs)", cache_key or "?", len(refs))
         try:
-            text = _call_claude(self._client_(), self.model, prompt, max_tokens=1024)
-            if cache_key:  # only cache on success
-                self._rw_cache.set(cache_key, text)
-            return text
+            return _call_claude(self._client_(), self.model, prompt, max_tokens=1024)
         except Exception as exc:
-            log.warning("TopKRelatedWorkBuilder: synthesis failed (%s), falling back to numbered ref list", exc)
-            return ref_block
+            log.warning("TopKRelatedWorkBuilder: synthesis failed (%s), will not cache", exc)
+            return None
 
 
 # ── Registry and factory ──────────────────────────────────────────────────────

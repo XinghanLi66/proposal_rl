@@ -1,0 +1,9 @@
+# Frontline papers for dl-activation-function task.
+# These are the papers behind the reference baselines (gelu, silu, mish).
+# Their combined reference lists form the prompt for the proposal model.
+# Hendrycks & Gimpel 2016 - Gaussian Error Linear Units (GELU)
+1606.08415
+# Ramachandran et al. 2017 - Searching for Activation Functions (Swish/SiLU)
+1710.05941
+# Misra 2019 - Mish: A Self Regularized Non-Monotonic Neural Activation Function
+1908.08681

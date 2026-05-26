@@ -1,0 +1,9 @@
+# Frontline papers for cv-data-augmentation task.
+# These are the papers behind the reference baselines (cutout, randaugment, trivialaugment).
+# Their combined reference lists form the prompt for the proposal model.
+# DeVries & Taylor 2017 - Improved Regularization of CNNs with Cutout
+1708.04552
+# Cubuk et al. 2020 - RandAugment: Practical Automated Data Augmentation
+1909.13719
+# Mueller & Hutter 2021 - TrivialAugment: Tuning-free Yet State-of-the-Art Data Augmentation
+2103.10158

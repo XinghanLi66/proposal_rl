@@ -139,13 +139,13 @@ def synthesize_cot(record: dict, model: str, max_tokens: int, temperature: float
 
 def generate_baseline(record: dict, model: str, max_tokens: int) -> tuple[str, float]:
     t0 = time.time()
-    with _claude_client().messages.stream(
+    msg = _claude_client().messages.create(
         model=model,
         max_tokens=max_tokens,
         system=record["system"],
         messages=[{"role": "user", "content": record["prompt"]}],
-    ) as stream:
-        text = stream.get_final_text()
+    )
+    text = msg.content[0].text if msg.content else ""
     return text, time.time() - t0
 
 
@@ -392,7 +392,14 @@ def load_model_and_tokenizer(checkpoint: Path, base_model: str | None, cfg: dict
 
 # ── Generation ────────────────────────────────────────────────────────────────
 
-def generate(model, tokenizer, record: dict, max_new_tokens: int, device: str) -> str:
+def generate(
+    model,
+    tokenizer,
+    record: dict,
+    max_new_tokens: int,
+    device: str,
+    temperature: float = 0.7,
+) -> str:
     messages = [
         {"role": "system", "content": record["system"]},
         {"role": "user",   "content": record["prompt"]},
@@ -405,8 +412,9 @@ def generate(model, tokenizer, record: dict, max_new_tokens: int, device: str) -
         out = model.generate(
             **enc,
             max_new_tokens=max_new_tokens,
-            do_sample=False,
-            temperature=1.0,
+            do_sample=True,
+            temperature=temperature,
+            top_p=0.95,
             pad_token_id=tokenizer.eos_token_id,
         )
     new_tokens = out[0][enc["input_ids"].shape[1]:]
@@ -441,10 +449,18 @@ def main():
     group = parser.add_mutually_exclusive_group(required=True)
     group.add_argument("--paper", help="arxiv_id or path to metadata.json")
     group.add_argument("--record", help="Path to a dataset JSONL file; use with --index")
+    group.add_argument("--from-json", metavar="PATH",
+                       help="Load a pre-built record JSON (system+prompt already set); "
+                            "skip prompt building and go straight to generation.")
 
     parser.add_argument("--index", type=int, default=0, help="Line index in --record JSONL")
     parser.add_argument("--max-new-tokens", type=int, default=2048)
+    parser.add_argument("--temperature", type=float, default=0.7,
+                        help="Sampling temperature for checkpoint generation.")
     parser.add_argument("--prompt-only", action="store_true")
+    parser.add_argument("--save", metavar="PATH",
+                        help="Write {\"response\": ...} JSON to this path after generation.")
+    parser.add_argument("--quiet", action="store_true", help="Suppress non-essential output.")
     args = parser.parse_args()
 
     if not args.checkpoint and not args.cot and not args.baseline and not args.prompt_only:
@@ -464,7 +480,9 @@ def main():
 
     # Load record
     record = None
-    if args.record:
+    if args.from_json:
+        record = json.loads(Path(args.from_json).read_text())
+    elif args.record:
         print(f"Loading record #{args.index} from {args.record}")
         record = load_record_from_jsonl(Path(args.record), args.index)
         # Optionally rebuild prompt with the requested strategy (if explicitly set)
@@ -564,17 +582,37 @@ def main():
         print(sep)
 
     # ── Checkpoint generation ─────────────────────────────────────────────────
+    checkpoint_output = None
     if args.checkpoint:
-        print(f"\nCheckpoint: {args.checkpoint}")
+        if not args.quiet:
+            print(f"\nCheckpoint: {args.checkpoint}")
         model, tokenizer, device = load_model_and_tokenizer(
             Path(args.checkpoint), args.base_model, cfg
         )
-        print("\nGenerating...")
-        output = generate(model, tokenizer, record, args.max_new_tokens, device)
-        print(f"\n── MODEL OUTPUT ({Path(args.checkpoint).name}) ──────────────────────────────────")
-        print(output)
-        eval_and_print_fas(Path(args.checkpoint).name, output)
-        print(sep)
+        if not args.quiet:
+            print("\nGenerating...")
+        checkpoint_output = generate(
+            model, tokenizer, record, args.max_new_tokens, device,
+            temperature=args.temperature,
+        )
+        if not args.quiet:
+            print(f"\n── MODEL OUTPUT ({Path(args.checkpoint).name}) ──────────────────────────────────")
+            print(checkpoint_output)
+            eval_and_print_fas(Path(args.checkpoint).name, checkpoint_output)
+            print(sep)
+
+    # ── Save output ───────────────────────────────────────────────────────────
+    if args.save:
+        response = checkpoint_output
+        out = {
+            "arxiv_id": record.get("arxiv_id", ""),
+            "title": record.get("title", ""),
+            "response": response,
+            "checkpoint": args.checkpoint,
+        }
+        Path(args.save).write_text(json.dumps(out, ensure_ascii=False, indent=2))
+        if not args.quiet:
+            print(f"\nSaved to {args.save}")
 
 
 if __name__ == "__main__":

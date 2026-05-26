@@ -1,0 +1,213 @@
+# verl PPO/GRPO trainer config for proposal_rl.
+# Consumed by train/rl.py; overridden programmatically per experiment.
+# Uses Ray + FSDP (actor) + vLLM (rollout) — no DeepSpeed.
+
+# Hydra-style defaults are not used here; all sub-configs are inlined so that
+# OmegaConf.merge() in train/rl.py can overlay experiment-specific values.
+
+data:
+  train_files: null
+  val_files:   null
+  train_batch_size: 8        # overridden: per_device_bsz × n_gpu × grad_accum
+  max_prompt_length: 4096
+  max_response_length: 2048
+  return_raw_chat: true
+  reward_fn_key: data_source
+  shuffle: true
+  dataloader_num_workers: 4
+  filter_overlong_prompts: true
+  truncation: left
+  sampler:
+    class_path: null
+    class_name: null
+
+actor_rollout_ref:
+  hybrid_engine: true
+  nccl_timeout: 600
+
+  model:
+    _target_: verl.workers.config.HFModelConfig
+    path: null               # set to SFT checkpoint in train/rl.py
+    trust_remote_code: false
+    enable_gradient_checkpointing: false
+    use_remove_padding: false
+    lora_rank: 0
+    lora_alpha: 128
+    target_modules: all-linear
+    override_config:
+      attn_implementation: sdpa
+
+  actor:
+    _target_: verl.workers.config.FSDPActorConfig
+    strategy: fsdp
+    grad_clip: 1.0
+    use_remove_padding: false
+    use_kl_loss: true
+    kl_loss_coef: 0.05
+    kl_loss_type: low_var_kl
+    clip_ratio: 0.2
+    ppo_mini_batch_size: 8
+    ppo_micro_batch_size_per_gpu: 1
+    ppo_max_token_len_per_gpu: 16384
+    use_dynamic_bsz: false
+    rollout_n: 8                  # must match rollout.n
+    ppo_epochs: 1
+    shuffle: false
+    data_loader_seed: 42
+    loss_agg_mode: token-mean
+    entropy_coeff: 0.0
+    optim:
+      _target_: verl.workers.config.FSDPOptimizerConfig
+      optimizer: AdamW
+      optimizer_impl: torch.optim
+      lr: 5.0e-6             # overridden per experiment
+      lr_warmup_steps_ratio: 0.05
+      weight_decay: 0.0
+      clip_grad: 1.0
+      lr_scheduler_type: cosine
+    fsdp_config:
+      _target_: verl.workers.config.FSDPEngineConfig
+      strategy: fsdp
+      dtype: bfloat16
+      param_offload: false
+      optimizer_offload: false
+      reshard_after_forward: true
+      use_torch_compile: false
+
+  rollout:
+    _target_: verl.workers.config.RolloutConfig
+    name: vllm
+    mode: async
+    temperature: 1.0
+    top_k: -1
+    top_p: 1.0
+    n: 8                     # GRPO group size (num_generations)
+    dtype: bfloat16
+    gpu_memory_utilization: 0.6
+    enforce_eager: false
+    free_cache_engine: true
+    tensor_model_parallel_size: 1
+    data_parallel_size: 1
+    max_num_batched_tokens: 16384
+    prompt_length: 4096
+    response_length: 2048
+    log_prob_micro_batch_size: null
+    log_prob_micro_batch_size_per_gpu: 1
+    log_prob_use_dynamic_bsz: false
+    log_prob_max_token_len_per_gpu: 16384
+    do_sample: true
+    ignore_eos: false
+    max_model_len: null
+    max_num_seqs: 1024
+    enable_chunked_prefill: false
+    enable_prefix_caching: true
+    logprobs_mode: processed_logprobs
+    scheduling_policy: fcfs
+    load_format: dummy
+    disable_log_stats: true
+    checkpoint_engine:
+      update_weights_bucket_megabytes: 4096
+    over_sample_rate: 0
+    engine_kwargs:
+      vllm: {}
+    val_kwargs:
+      _target_: verl.workers.config.SamplingConfig
+      top_k: -1
+      top_p: 1.0
+      temperature: 0
+      n: 1
+      do_sample: false
+    multi_turn:
+      _target_: verl.workers.config.MultiTurnConfig
+      enable: false
+
+  ref:
+    log_prob_micro_batch_size: null
+    log_prob_micro_batch_size_per_gpu: 1
+    log_prob_use_dynamic_bsz: false
+    log_prob_max_token_len_per_gpu: 16384
+    fsdp_config:
+      _target_: verl.workers.config.FSDPEngineConfig
+      strategy: fsdp
+      dtype: bfloat16
+      param_offload: false
+      reshard_after_forward: true
+
+critic:
+  _target_: verl.workers.config.CriticConfig
+  strategy: fsdp
+  enable: false             # disabled for GRPO (no value network needed)
+
+algorithm:
+  _target_: verl.trainer.config.AlgoConfig
+  gamma: 1.0
+  lam: 1.0
+  adv_estimator: grpo         # GRPO (no value net); override to reinforce_plus_plus for RLOO-like
+  norm_adv_by_std_in_grpo: true
+  use_kl_in_reward: false
+  kl_penalty: kl
+  kl_ctrl:
+    _target_: verl.trainer.config.KLControlConfig
+    type: fixed
+    kl_coef: 0.05             # overridden per experiment
+
+reward:
+  num_workers: 4
+  custom_reward_function:
+    path: null                # set to train/verl_reward.py in train/rl.py
+    name: compute_score
+    reward_kwargs: {}
+  reward_manager:
+    _target_: verl.workers.config.reward_model.RewardManagerConfig
+    source: register
+    name: naive
+  reward_model:
+    enable: false
+    enable_resource_pool: false
+    n_gpus_per_node: 8
+    nnodes: 0
+    model_path: null
+
+trainer:
+  balance_batch: true
+  default_local_dir: null     # set by train/rl.py
+  default_hdfs_dir: null
+  project_name: proposal_rl
+  experiment_name: rl
+  total_epochs: 1
+  total_training_steps: null
+  logger: ["console"]
+  seed: 42
+  save_freq: 100
+  test_freq: -1
+  max_ckpt_to_keep: 3
+  resume_mode: disable
+  resume_from_path: null
+  device: cuda
+  nnodes: 1
+  n_gpus_per_node: 8
+  val_before_train: false
+  critic_warmup: 0
+
+ray_kwargs:
+  ray_init:
+    num_cpus: 32
+    _temp_dir: /dev/shm/ray_tmp
+
+transfer_queue:
+  enable: false
+
+global_profiler:
+  _target_: verl.utils.profiler.ProfilerConfig
+  tool: null
+  steps: null
+  profile_continuous_steps: false
+  save_path: outputs/profile
+  global_tool_config:
+    nsys:
+      _target_: verl.utils.profiler.config.NsightToolConfig
+      discrete: false
+      worker_nsight_options:
+        trace: "cuda,nvtx,cublas,ucx"
+        cuda-memory-usage: "true"
+        cuda-graph-trace: graph

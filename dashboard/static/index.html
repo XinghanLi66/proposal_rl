@@ -7,676 +7,464 @@
 <style>
 *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
 :root {
-  --bg:    #141414;
-  --card:  #1e1e1e;
-  --bord:  #2e2e2e;
-  --dim:   #555;
-  --txt:   #d4d4d4;
-  --head:  #888;
-  --green: #4ec94e;
-  --yellow:#d4a017;
-  --red:   #e05252;
-  --blue:  #5599ee;
-  --cyan:  #4ec9b0;
-  --ff:    'Menlo','Consolas','DejaVu Sans Mono',monospace;
+  --bg: #141414; --card: #1e1e1e; --bord: #2e2e2e; --dim: #555;
+  --txt: #d4d4d4; --head: #888; --green: #4ec94e; --yellow: #d4a017;
+  --red: #e05252; --blue: #5599ee; --cyan: #4ec9b0;
+  --ff: 'Menlo','Consolas','DejaVu Sans Mono',monospace;
 }
-body { background:var(--bg); color:var(--txt); font:12px/1.5 var(--ff); }
+body { background: var(--bg); color: var(--txt); font: 12px/1.5 var(--ff); }
 
-/* ── tab bar ── */
-#tab-bar { display:flex; align-items:center; gap:0; padding:0 8px;
-           border-bottom:1px solid var(--bord); background:#161616; overflow-x:auto; }
-.tab { padding:6px 14px; cursor:pointer; color:var(--head); font-size:11px;
-       border-bottom:2px solid transparent; white-space:nowrap; user-select:none; }
-.tab:hover { color:var(--txt); }
-.tab.active { color:var(--blue); border-bottom-color:var(--blue); }
-#tab-bar-meta { margin-left:auto; display:flex; gap:8px; align-items:center; padding:4px 0; }
-#refresh-btn { cursor:pointer; color:var(--blue); background:none; border:1px solid var(--blue);
-               padding:2px 8px; font:inherit; white-space:nowrap; }
-#last-refresh { color:var(--dim); font-size:11px; white-space:nowrap; }
+/* tab bar */
+#tab-bar {
+  display: flex; align-items: center; padding: 0 8px;
+  border-bottom: 1px solid var(--bord); background: #161616; overflow-x: auto;
+}
+.tab {
+  padding: 6px 14px; cursor: pointer; color: var(--head); font-size: 11px;
+  border-bottom: 2px solid transparent; white-space: nowrap; user-select: none; flex-shrink: 0;
+}
+.tab:hover { color: var(--txt); }
+.tab.active { color: var(--blue); border-bottom-color: var(--blue); }
+#tab-meta { margin-left: auto; display: flex; gap: 8px; align-items: center; padding: 4px 0; flex-shrink: 0; }
+#refresh-btn {
+  cursor: pointer; color: var(--blue); background: none; border: 1px solid var(--blue);
+  padding: 2px 8px; font: inherit; white-space: nowrap;
+}
+#clock { color: var(--dim); font-size: 11px; white-space: nowrap; }
 
-/* ── layout ── */
-#main { padding:8px; display:grid; gap:8px; }
-.row    { display:grid; gap:8px; }
-.row-2  { grid-template-columns:1fr 1fr; }
-.row-3  { grid-template-columns:1fr 1fr 1fr; }
-.row-4  { grid-template-columns:repeat(4,1fr); }
+/* layout */
+.view { padding: 8px; display: grid; gap: 8px; }
+.row-3 { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 8px; }
+.row-2 { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
 
-.card { background:var(--card); border:1px solid var(--bord); padding:8px; }
-.card-title { color:var(--head); font-size:10px; text-transform:uppercase;
-              letter-spacing:.08em; margin-bottom:6px;
-              border-bottom:1px solid var(--bord); padding-bottom:4px; }
+.card { background: var(--card); border: 1px solid var(--bord); padding: 8px; }
+.card-title {
+  color: var(--head); font-size: 10px; text-transform: uppercase;
+  letter-spacing: .08em; margin-bottom: 6px;
+  border-bottom: 1px solid var(--bord); padding-bottom: 4px;
+}
 
-/* ── pills ── */
-.pill { display:inline-block; padding:1px 6px; border-radius:3px; font-size:10px; }
-.pill-running { background:#2d4a2d; color:var(--green); }
-.pill-done    { background:#2d3a50; color:var(--blue);  }
-.pill-pending { background:#3a3a20; color:var(--yellow);}
+/* kv grid */
+.kv { display: grid; grid-template-columns: max-content 1fr; gap: 2px 10px; }
+.kv .k { color: var(--head); }
 
-/* ── kv grid ── */
-.kv { display:grid; grid-template-columns:max-content 1fr; gap:2px 10px; }
-.kv .k { color:var(--head); }
-.kv .v { color:var(--txt); }
-.kv .v.hi  { color:var(--green); }
-.kv .v.warn{ color:var(--yellow); }
-.kv .v.bad { color:var(--red); }
+/* pills */
+.pill { display: inline-block; padding: 1px 6px; border-radius: 3px; font-size: 10px; }
+.pill-running     { background: #2d4a2d; color: var(--green); }
+.pill-done        { background: #2d3a50; color: var(--blue); }
+.pill-pending     { background: #3a3a20; color: var(--yellow); }
+.pill-interrupted { background: #3a2020; color: var(--red); }
 
-/* ── charts ── */
-.chart-row  { display:grid; gap:8px; }
-.chart-cell { background:var(--card); border:1px solid var(--bord); padding:6px; }
-.chart-label{ font-size:10px; color:var(--head); margin-bottom:4px; }
-canvas      { display:block; }
+/* progress bar */
+.prog { background: #2a2a2a; border-radius: 2px; height: 4px; margin: 4px 0; overflow: hidden; }
+.prog-fill { height: 100%; background: var(--blue); transition: width .3s; }
+.prog-fill.done { background: var(--green); }
 
-/* ── tables ── */
-table { width:100%; border-collapse:collapse; font-size:11px; }
-th { color:var(--head); font-weight:normal; text-align:left;
-     padding:3px 6px; border-bottom:1px solid var(--bord); }
-td { padding:3px 6px; border-bottom:1px solid #252525; }
-tr:hover td { background:#252525; }
-.best td { color:var(--green); }
+/* charts */
+.chart-grid   { display: grid; gap: 8px; }
+.chart-grid-4 { grid-template-columns: repeat(4, 1fr); }
+.chart-grid-3 { grid-template-columns: repeat(3, 1fr); }
+.chart-cell   { background: var(--card); border: 1px solid var(--bord); padding: 6px; }
+.chart-label  { font-size: 10px; color: var(--head); margin-bottom: 4px; }
 
-/* ── rollouts ── */
-.rollout { border:1px solid var(--bord); margin-bottom:6px; padding:6px; font-size:11px; }
-.rollout-pos { border-color:#2d4a2d; }
-.rollout-neg { border-color:#4a2d2d; }
-.rollout-header { display:flex; gap:8px; margin-bottom:4px; }
-.score-hi  { color:var(--green); }
-.score-low { color:var(--red); }
-.tag { background:#2e2e2e; border:1px solid var(--bord); padding:0 4px;
-       margin:0 2px; border-radius:2px; font-size:10px; }
-.tag-bad { border-color:#6a3030; color:var(--red); }
-.proposal-text { color:#aaa; white-space:pre-wrap; word-break:break-word;
-                 max-height:600px; overflow-y:auto; background:#181818;
-                 padding:4px; margin-top:4px; border-left:2px solid var(--bord); }
+/* tables */
+table { width: 100%; border-collapse: collapse; font-size: 11px; }
+th { color: var(--head); font-weight: normal; text-align: left; padding: 3px 6px; border-bottom: 1px solid var(--bord); }
+td { padding: 3px 6px; border-bottom: 1px solid #252525; }
+.best td { color: var(--green); }
 
-/* ── failures ── */
-.failure { padding:4px 8px; margin-bottom:4px; border-left:3px solid var(--bord); font-size:11px; }
-.failure-critical { border-color:var(--red);    background:#2a1414; }
-.failure-high     { border-color:var(--yellow);  background:#2a2414; }
-.failure-warn     { border-color:var(--yellow);  background:#282010; }
-.failure-rollout  { border-color:var(--dim); }
-.failure .f-type  { color:var(--head); font-size:10px; margin-right:6px; }
-
-/* ── data stats ── */
-.stat-grid { display:grid; grid-template-columns:repeat(2,1fr); gap:4px 12px; }
-.stat-row  { display:flex; justify-content:space-between; font-size:11px; }
-.stat-row .sk { color:var(--head); }
-.stat-row .sv { color:var(--txt); }
-
-/* ── progress bar ── */
-.progress-wrap { background:#2a2a2a; border-radius:2px; height:5px; margin:4px 0; overflow:hidden; }
-.progress-fill { height:100%; background:var(--blue); border-radius:2px; transition:width .5s; }
-.progress-fill.done { background:var(--green); }
-
-/* ── hparam table ── */
-.hparam-best { color:var(--green); font-weight:bold; }
-
-.none { color:var(--dim); font-style:italic; }
-.mono { font-family:var(--ff); }
+.dim { color: var(--dim); font-style: italic; }
 </style>
 </head>
 <body>
 
-<!-- Tab bar -->
 <div id="tab-bar">
-  <div class="tab active" data-tab="pipeline" onclick="switchTab('pipeline')">Pipeline (SFT+GRPO)</div>
-  <!-- Experiment tabs injected dynamically -->
-  <div id="tab-bar-meta">
-    <button id="refresh-btn" onclick="refreshAll()">↻ refresh</button>
-    <span id="last-refresh">–</span>
+  <div id="tab-meta">
+    <button id="refresh-btn" onclick="fullRefresh()">↻ refresh</button>
+    <span id="clock">–</span>
   </div>
 </div>
-
-<!-- Pipeline tab content -->
-<div id="view-pipeline">
-<div id="main">
-  <div class="row row-3">
-    <div class="card" id="sft-summary"><div class="card-title">SFT</div><div class="none">loading…</div></div>
-    <div class="card" id="grpo-summary"><div class="card-title">GRPO</div><div class="none">loading…</div></div>
-    <div class="card" id="config-panel"><div class="card-title">Config / Dataset</div><div class="none">loading…</div></div>
-  </div>
-
-  <div class="card">
-    <div class="card-title">GRPO Training Curves</div>
-    <div class="chart-row" style="grid-template-columns:repeat(4,1fr);">
-      <div class="chart-cell"><div class="chart-label">Reward (combined)</div><canvas id="c-reward"  height="100"></canvas></div>
-      <div class="chart-cell"><div class="chart-label">PRS reward</div>       <canvas id="c-prs"     height="100"></canvas></div>
-      <div class="chart-cell"><div class="chart-label">Format reward</div>    <canvas id="c-format"  height="100"></canvas></div>
-      <div class="chart-cell"><div class="chart-label">KL divergence</div>    <canvas id="c-kl"      height="100"></canvas></div>
-      <div class="chart-cell"><div class="chart-label">Learning rate</div>    <canvas id="c-lr-grpo" height="100"></canvas></div>
-      <div class="chart-cell"><div class="chart-label">Completion length</div><canvas id="c-clen"    height="100"></canvas></div>
-      <div class="chart-cell"><div class="chart-label">Clipped ratio</div>    <canvas id="c-clip"    height="100"></canvas></div>
-      <div class="chart-cell"><div class="chart-label">Entropy</div>          <canvas id="c-entropy" height="100"></canvas></div>
-    </div>
-  </div>
-
-  <div class="row row-2">
-    <div class="card">
-      <div class="card-title">SFT Training Curves</div>
-      <div class="chart-row" style="grid-template-columns:repeat(3,1fr);">
-        <div class="chart-cell"><div class="chart-label">Train loss</div>    <canvas id="c-sft-loss" height="100"></canvas></div>
-        <div class="chart-cell"><div class="chart-label">Token accuracy</div><canvas id="c-sft-acc"  height="100"></canvas></div>
-        <div class="chart-cell"><div class="chart-label">Learning rate</div> <canvas id="c-sft-lr"   height="100"></canvas></div>
-      </div>
-    </div>
-    <div class="card" id="checkpoint-panel">
-      <div class="card-title">Checkpoints</div><div class="none">loading…</div>
-    </div>
-  </div>
-
-  <div class="row row-2">
-    <div class="card" id="rollouts-sft">
-      <div class="card-title">SFT Rollout Examples</div><div class="none">loading…</div>
-    </div>
-    <div class="card" id="rollouts-grpo">
-      <div class="card-title">GRPO Rollout Examples</div><div class="none">loading…</div>
-    </div>
-  </div>
-
-  <div class="row row-2">
-    <div class="card" id="failures-panel">
-      <div class="card-title">Failure Cases</div><div class="none">loading…</div>
-    </div>
-    <div class="card" id="datastats-panel">
-      <div class="card-title">Data / Generation Stats</div><div class="none">loading…</div>
-    </div>
-  </div>
-</div>
-</div>
-
-<!-- Experiment tab content (one per registered experiment, hidden initially) -->
-<div id="view-experiments" style="display:none">
-  <div id="exp-main" style="padding:8px; display:grid; gap:8px;">
-    <!-- injected by renderExperimentView() -->
-  </div>
-</div>
+<div id="views"></div>
 
 <script>
-// ──────────────────────────────────────────────────────────────────────────────
-// Chart registry
-// ──────────────────────────────────────────────────────────────────────────────
-const charts = {};
+// ── State ─────────────────────────────────────────────────────────────────────
+const CHARTS = {};          // chartId → Chart.js instance
+const CHARTS_INIT = new Set(); // runIds whose charts have been initialized
+let _runs = [];
+let _activeId = null;
+
+// ── Chart helpers ─────────────────────────────────────────────────────────────
 const C = {
-  reward:'#4ec94e', prs:'#5599ee', fas:'#5599ee', format:'#d4a017',
-  kl:'#e05252', lr:'#888', clen:'#4ec9b0', clip:'#e05252',
-  entropy:'#c586c0', loss:'#e05252', acc:'#4ec94e',
+  reward: '#4ec94e', prs: '#5599ee', format: '#d4a017', kl: '#e05252',
+  lr: '#888', clen: '#4ec9b0', loss: '#e05252', acc: '#4ec94e', entropy: '#c586c0',
 };
 
-function makeChart(id, label, color, {ymin, ymax, fill}={}) {
+function makeChart(id, label, color, ymin, ymax) {
+  if (CHARTS[id]) CHARTS[id].destroy();
   const ctx = document.getElementById(id);
-  if (!ctx) return null;
-  if (charts[id]) charts[id].destroy();
-  charts[id] = new Chart(ctx, {
+  if (!ctx) return;
+  CHARTS[id] = new Chart(ctx, {
     type: 'line',
     data: { datasets: [{ label, data: [], borderColor: color,
-      backgroundColor: fill ? color+'20' : 'transparent',
-      borderWidth:1.5, pointRadius:0, fill:!!fill, tension:0.2 }] },
+      backgroundColor: 'transparent', borderWidth: 1.5, pointRadius: 0, tension: 0.2 }] },
     options: {
-      responsive:true, animation:false,
-      plugins:{ legend:{display:false}, tooltip:{callbacks:{
-        label: c=>`${c.dataset.label}: ${typeof c.raw?.y==='number'?c.raw.y.toPrecision(4):c.raw?.y}`
-      }}},
-      scales:{
-        x:{ type:'linear', ticks:{color:'#555',maxTicksLimit:5,font:{size:9}}, grid:{color:'#222'} },
-        y:{ min:ymin, max:ymax, ticks:{color:'#555',maxTicksLimit:5,font:{size:9}}, grid:{color:'#222'} },
+      responsive: true, animation: false,
+      plugins: { legend: { display: false } },
+      scales: {
+        x: { type: 'linear', ticks: { color: '#555', maxTicksLimit: 5, font: { size: 9 } }, grid: { color: '#222' } },
+        y: { min: ymin, max: ymax, ticks: { color: '#555', maxTicksLimit: 5, font: { size: 9 } }, grid: { color: '#222' } },
       }
     }
   });
-  return charts[id];
 }
 
-function setData(id, points) {
-  const ch = charts[id];
-  if (!ch) return;
-  ch.data.datasets[0].data = points;
-  ch.update('none');
+function setData(id, data) {
+  if (CHARTS[id]) { CHARTS[id].data.datasets[0].data = data; CHARTS[id].update('none'); }
 }
 
 function pts(metrics, key) {
-  return metrics.filter(m=>m._step!=null&&m[key]!=null).map(m=>({x:m._step,y:m[key]}));
+  return metrics.filter(m => m._step != null && m[key] != null).map(m => ({ x: m._step, y: m[key] }));
 }
 
-// ──────────────────────────────────────────────────────────────────────────────
-// Render helpers
-// ──────────────────────────────────────────────────────────────────────────────
-function pill(status) {
-  const cls={running:'pill-running',done:'pill-done',pending:'pill-pending'}[status]||'';
-  return `<span class="pill ${cls}">${status}</span>`;
-}
-function pct(n, d) { return d ? `${(100*n/d).toFixed(1)}%` : '–'; }
-function fmt(v, digits=4) {
-  if (v==null) return '<span class="none">–</span>';
-  return typeof v==='number' && v.toPrecision ? v.toPrecision(digits) : v;
-}
-function scoreClass(v) {
-  if (v==null) return '';
-  return v>=0.7?'score-hi':(v<=0.35?'score-low':'');
+// ── Render helpers ────────────────────────────────────────────────────────────
+function pill(s) {
+  return `<span class="pill pill-${s || 'pending'}">${s || 'pending'}</span>`;
 }
 
-function stageSummaryHtml(label, s) {
-  if (!s) return '';
-  let pbar='';
-  if (s.step!=null && s.total_steps) {
-    const p=Math.min(100,(s.step/s.total_steps*100)).toFixed(1);
-    const cls=s.status==='done'?'done':'';
-    pbar=`<div class="progress-wrap"><div class="progress-fill ${cls}" style="width:${p}%"></div></div>`;
+function fmt(v) {
+  if (v == null) return '<span class="dim">–</span>';
+  return typeof v === 'number' ? v.toPrecision(4) : String(v);
+}
+
+function stageCardHTML(title, s) {
+  if (!s) return `<div class="card-title">${title}</div><span class="dim">–</span>`;
+
+  let prog = '';
+  if (s.step != null && s.total_steps) {
+    const p = Math.min(100, s.step / s.total_steps * 100).toFixed(0);
+    prog = `<div class="prog"><div class="prog-fill ${s.status === 'done' ? 'done' : ''}" style="width:${p}%"></div></div>`;
   }
-  const e=s.eval;
-  let evalHtml='';
+
+  // Live metrics (RL or SFT depending on what's present)
+  let live = '';
+  if (s.last_reward != null) live += `<span class="k">reward</span><span class="v">${fmt(s.last_reward)}</span>`;
+  if (s.last_prs    != null) live += `<span class="k">PRS</span><span class="v">${fmt(s.last_prs)}</span>`;
+  if (s.last_fas    != null) live += `<span class="k">FAS</span><span class="v">${fmt(s.last_fas)}</span>`;
+  if (s.last_fmt    != null) live += `<span class="k">fmt</span><span class="v">${fmt(s.last_fmt)}</span>`;
+  if (s.last_kl     != null) live += `<span class="k">KL</span><span class="v">${fmt(s.last_kl)}</span>`;
+  if (s.last_loss   != null) live += `<span class="k">loss</span><span class="v">${fmt(s.last_loss)}</span>`;
+
+  let evalHTML = '';
+  const e = s.eval;
   if (e) {
-    evalHtml=`<div style="margin-top:6px;padding-top:6px;border-top:1px solid var(--bord)">
-      <div class="k" style="color:var(--head);font-size:10px;margin-bottom:3px">Eval n=${e.n_examples||'?'}</div>
+    evalHTML = `<div style="margin-top:6px;padding-top:6px;border-top:1px solid var(--bord)">
+      <div class="k" style="color:var(--head);font-size:10px;margin-bottom:3px">eval  n=${e.n_examples ?? '?'}</div>
       <div class="kv">
-        <span class="k">FAS</span>       <span class="v hi">${fmt(e.FAS)}</span>
-        <span class="k">recall@50</span> <span class="v">${fmt(e.recall_at_k)}</span>
-        <span class="k">mean_sim</span>  <span class="v">${fmt(e.mean_similarity)}</span>
-        <span class="k">format</span>    <span class="v">${fmt(e.format_score)}</span>
+        <span class="k">FAS</span><span class="v" style="color:var(--green)">${fmt(e.FAS)}</span>
+        <span class="k">recall@50</span><span class="v">${fmt(e.recall_at_k)}</span>
+        <span class="k">format</span><span class="v">${fmt(e.format_score)}</span>
       </div></div>`;
   }
-  let liveHtml='';
-  if (s.status==='running') {
-    liveHtml=`
-      ${s.last_prs!=null?`<span class="k">PRS reward</span><span class="v hi">${fmt(s.last_prs)}</span>`:''}
-      ${s.last_fas!=null?`<span class="k">FAS reward</span><span class="v hi">${fmt(s.last_fas)}</span>`:''}
-      <span class="k">fmt reward</span><span class="v">${fmt(s.last_fmt)}</span>
-      <span class="k">KL</span>         <span class="v">${fmt(s.last_kl)}</span>`;
-  }
-  return `
-    <div class="card-title">${label} ${pill(s.status)}</div>
-    ${pbar}
+
+  return `<div class="card-title">${title} ${pill(s.status)}</div>
+    ${prog}
     <div class="kv">
-      <span class="k">step</span>    <span class="v">${s.step!=null?s.step:'–'} / ${s.total_steps||'–'}</span>
-      <span class="k">epoch</span>   <span class="v">${fmt(s.epoch,3)}</span>
-      <span class="k">eta</span>     <span class="v">${s.eta||'–'}</span>
-      <span class="k">loss</span>    <span class="v">${fmt(s.last_loss)}</span>
-      ${liveHtml}
-      <span class="k">updated</span> <span class="v">${s.last_update||'–'}</span>
-    </div>${evalHtml}`;
+      <span class="k">step</span><span class="v">${s.step ?? '–'} / ${s.total_steps ?? '–'}</span>
+      <span class="k">eta</span><span class="v">${s.eta ?? '–'}</span>
+      ${live}
+      <span class="k">updated</span><span class="v">${s.last_update ?? '–'}</span>
+    </div>${evalHTML}`;
 }
 
-function rolloutHtml(r, polarity) {
-  const s=r.score??r.fas;
-  const tags=(r.tags||[]).map(t=>`<span class="tag">${t}</span>`).join('');
-  return `<div class="rollout rollout-${polarity}">
-    <div class="rollout-header">
-      <span>step=${r.step??'?'}</span>
-      <span class="${scoreClass(s)}">score=${s!=null?s.toFixed(4):'–'}</span>
-      ${r.format!=null?`<span>fmt=${r.format.toFixed(2)}</span>`:''}
-      ${r.source?`<span style="color:var(--dim)">[${r.source}]</span>`:''}
-      ${tags}
-    </div>
-    ${r.prompt?`<div style="color:var(--dim);font-size:10px">prompt: ${String(r.prompt).slice(0,80)}…</div>`:''}
-    <div class="proposal-text">${r.output||''}</div>
-  </div>`;
-}
-
-function renderRollouts(el, title, data) {
-  const pos=data.positive||[], neg=data.negative||[];
-  if (!data.total) {
-    el.innerHTML=`<div class="card-title">${title}</div><div class="none">no rollout data yet</div>`;
-    return;
-  }
-  el.innerHTML=`
-    <div class="card-title">${title} (${data.total} total)</div>
-    <div style="color:var(--green);font-size:10px;margin:4px 0">▲ HIGH SCORE</div>
-    ${pos.map(r=>rolloutHtml(r,'pos')).join('')||'<div class="none">–</div>'}
-    <div style="color:var(--red);font-size:10px;margin:4px 0">▼ LOW SCORE</div>
-    ${neg.map(r=>rolloutHtml(r,'neg')).join('')||'<div class="none">–</div>'}`;
-}
-
-function renderFailures(el, failureArrays) {
-  const all=failureArrays.flatMap((f,i)=>
-    (f?.failures||[]).map(x=>({...x, stage:f._stage||`Stage${i}`})));
-  if (!all.length) {
-    el.innerHTML='<div class="card-title">Failure Cases</div><div style="color:var(--green)">✓ no failures detected</div>';
-    return;
-  }
-  const sevClass={critical:'failure-critical',high:'failure-high',warn:'failure-warn'};
-  const rows=all.map(f=>{
-    const cls=sevClass[f.sev]||'failure-rollout';
-    const tagHtml=(f.tags||[]).map(t=>`<span class="tag tag-bad">${t}</span>`).join('');
-    const msg=f.msg||(f.preview?f.preview.slice(0,200):'');
-    return `<div class="failure ${cls}">
-      <span class="f-type">[${f.stage}] ${f.type}</span>
-      ${f.sev?`<span class="tag">${f.sev}</span>`:''}${tagHtml}
-      ${f.step!=null?`<span style="color:var(--dim)"> step=${f.step}</span>`:''}
-      ${f.score!=null?`<span class="${scoreClass(f.score)}"> score=${Number(f.score).toFixed(3)}</span>`:''}
-      ${msg?`<div style="color:#aaa;margin-top:2px">${msg}</div>`:''}
+function configCardHTML(run) {
+  const c = run.config || {};
+  return `<div class="card-title">config · <span style="color:var(--blue)">${run.type}</span></div>
+    <div class="kv">
+      <span class="k">strategy</span><span class="v">${c.strategy ?? '–'}</span>
+      <span class="k">finetune</span><span class="v">${c.finetune_mode ?? '–'}</span>
+      <span class="k">reward</span><span class="v">${c.reward_type ?? '–'}</span>
     </div>`;
-  });
-  el.innerHTML=`<div class="card-title">Failure Cases (${all.length})</div>${rows.join('')}`;
 }
 
-function renderCheckpoints(el, cps) {
-  if (!cps.length) {
-    el.innerHTML='<div class="card-title">Checkpoints</div><div class="none">none yet</div>'; return;
-  }
-  let bestFAS=-Infinity, bestIdx=-1;
-  cps.forEach((cp,i)=>{ if(cp.eval?.FAS>bestFAS){bestFAS=cp.eval.FAS;bestIdx=i;} });
-  const rows=cps.map((cp,i)=>{
-    const e=cp.eval;
-    const cls=i===bestIdx?'class="best"':'';
-    return `<tr ${cls}>
-      <td>${cp.name}</td><td>${cp.mtime}</td>
-      <td>${e?e.FAS?.toFixed(4):'–'}</td>
-      <td>${e?e.recall_at_k?.toFixed(4):'–'}</td>
-      <td>${e?e.format_score?.toFixed(3):'–'}</td>
-    </tr>`;
+function hparamCardHTML(hp) {
+  if (!hp?.results?.length)
+    return `<div class="card-title">hparam search</div><span class="dim">not run</span>`;
+  const best = hp.best;
+  const rows = hp.results.map(r => {
+    const ib = best && r.lr === best.lr && r.kl === best.kl;
+    return `<tr class="${ib ? 'best' : ''}">
+      <td>${r.lr}</td><td>${r.kl}</td>
+      <td>${r.mean_reward != null ? r.mean_reward.toFixed(4) : '–'}</td>
+      <td>${r.steps}</td></tr>`;
   }).join('');
-  el.innerHTML=`<div class="card-title">Checkpoints</div>
+  return `<div class="card-title">hparam search${best ? ` — best lr=${best.lr} kl=${best.kl}` : ''}</div>
+    <table><thead><tr><th>lr</th><th>kl</th><th>reward</th><th>steps</th></tr></thead>
+    <tbody>${rows}</tbody></table>`;
+}
+
+function checkpointsCardHTML(cps) {
+  if (!cps?.length)
+    return `<div class="card-title">checkpoints</div><span class="dim">none yet</span>`;
+  let bestFAS = -Infinity, bestIdx = -1;
+  cps.forEach((c, i) => { if ((c.eval?.FAS ?? -Infinity) > bestFAS) { bestFAS = c.eval.FAS; bestIdx = i; } });
+  const rows = cps.map((c, i) => `<tr class="${i === bestIdx && bestFAS > -Infinity ? 'best' : ''}">
+    <td>${c.name}</td><td>${c.mtime}</td>
+    <td>${c.eval?.FAS?.toFixed(4) ?? '–'}</td>
+    <td>${c.eval?.recall_at_k?.toFixed(4) ?? '–'}</td>
+    <td>${c.eval?.format_score?.toFixed(3) ?? '–'}</td>
+  </tr>`).join('');
+  return `<div class="card-title">checkpoints</div>
     <table><thead><tr><th>name</th><th>saved</th><th>FAS</th><th>recall@50</th><th>fmt</th></tr></thead>
     <tbody>${rows}</tbody></table>`;
 }
 
-function renderDataStats(el, d) {
-  function row(k,v){return `<div class="stat-row"><span class="sk">${k}</span><span class="sv">${v??'–'}</span></div>`;}
-  let html='<div class="card-title">Data / Generation Stats</div>';
-  for (const [split,s] of Object.entries(d)) {
-    if (split==='grpo_live'||!s.total) continue;
-    html+=`<div style="margin-bottom:6px">
-      <div style="color:var(--head);font-size:10px;margin-bottom:3px">${split}</div>
-      <div class="stat-grid">
-        ${row('total',s.total)}
-        ${row('has_cot',`${s.has_cot} (${pct(s.has_cot,s.total)})`)}
-        ${row('format_valid',`${s.format_valid} (${pct(s.format_valid,s.has_cot)})`)}
-        ${row('leakage',s.leakage)}
-        ${row('wlen p50',s.wlen_p50)}
-        ${row('wlen p95',s.wlen_p95)}
-      </div></div>`;
-  }
-  el.innerHTML=html;
-}
+// ── DOM building (one-time per run) ───────────────────────────────────────────
+function cid(runId, stage, name) { return `c-${runId}-${stage}-${name}`; }
 
-// ──────────────────────────────────────────────────────────────────────────────
-// Pipeline tab
-// ──────────────────────────────────────────────────────────────────────────────
-function initPipelineCharts() {
-  makeChart('c-reward', 'reward',      C.reward, {fill:true});
-  makeChart('c-prs',    'PRS reward',  C.prs,    {ymin:0,ymax:1});
-  makeChart('c-format', 'fmt reward',  C.format, {ymin:0,ymax:1});
-  makeChart('c-kl',     'KL',         C.kl);
-  makeChart('c-lr-grpo','LR',         C.lr);
-  makeChart('c-clen',   'compl len',  C.clen);
-  makeChart('c-clip',   'clipped',    C.clip, {ymin:0,ymax:1});
-  makeChart('c-entropy','entropy',    C.entropy);
-  makeChart('c-sft-loss','loss',      C.loss);
-  makeChart('c-sft-acc', 'token_acc', C.acc,  {ymin:0,ymax:1});
-  makeChart('c-sft-lr',  'LR',        C.lr);
-}
+function buildRunViewHTML(run) {
+  const id = run.id;
+  const hasSFT = run.type === 'sft' || run.type === 'sft_rl';
+  const hasRL  = run.type === 'rl'  || run.type === 'sft_rl';
 
-async function refreshPipeline() {
-  const [summary, grpoCurves, sftCurves, sftCps, grpoCps,
-         sftRoll, grpoRoll, sftFail, grpoFail, dstats] = await Promise.all([
-    fetchJSON('/api/summary'),
-    fetchJSON('/api/curves/grpo'),
-    fetchJSON('/api/curves/sft'),
-    fetchJSON('/api/checkpoints/sft'),
-    fetchJSON('/api/checkpoints/grpo'),
-    fetchJSON('/api/rollouts/sft'),
-    fetchJSON('/api/rollouts/grpo'),
-    fetchJSON('/api/failures/sft'),
-    fetchJSON('/api/failures/grpo'),
-    fetchJSON('/api/datastats'),
-  ]);
+  // Top row: status card(s) + config + hparam
+  const topRow = run.type === 'sft_rl'
+    ? `<div class="row-3">
+        <div class="card" id="sft-card-${id}"></div>
+        <div class="card" id="rl-card-${id}"></div>
+        <div class="card" id="cfg-card-${id}"></div>
+      </div>`
+    : hasRL
+    ? `<div class="row-3">
+        <div class="card" id="rl-card-${id}"></div>
+        <div class="card" id="cfg-card-${id}"></div>
+        <div class="card" id="hp-card-${id}"></div>
+      </div>`
+    : `<div class="row-2">
+        <div class="card" id="sft-card-${id}"></div>
+        <div class="card" id="cfg-card-${id}"></div>
+      </div>`;
 
-  document.getElementById('sft-summary').innerHTML =
-    stageSummaryHtml('SFT', summary.sft);
-  document.getElementById('grpo-summary').innerHTML =
-    stageSummaryHtml('GRPO', summary.grpo);
-
-  const c=summary.config||{}, ds=summary.dataset||{}, g=c.rl||{};
-  document.getElementById('config-panel').innerHTML=`
-    <div class="card-title">Config / Dataset</div>
-    <div class="kv">
-      <span class="k">model</span>   <span class="v">${c.model||'–'}</span>
-      <span class="k">train</span>   <span class="v">${(c.train_months||[]).join(', ')||'–'}</span>
-      <span class="k">val</span>     <span class="v">${(c.val_months||[]).join(', ')||'–'}</span>
-      <span class="k">test</span>    <span class="v">${(c.test_months||[]).join(', ')||'–'}</span>
-    </div>
-    <div style="margin-top:6px;padding-top:6px;border-top:1px solid var(--bord)">
-      <div class="kv">
-        <span class="k">train</span>     <span class="v">${ds.train||'–'} examples</span>
-        <span class="k">train_cot</span> <span class="v">${ds.train_cot||'–'}</span>
-        <span class="k">val</span>       <span class="v">${ds.val||'–'}</span>
-        <span class="k">test</span>      <span class="v">${ds.test||'–'}</span>
-      </div>
-    </div>
-    <div style="margin-top:6px;padding-top:6px;border-top:1px solid var(--bord)">
-      <div class="kv">
-        <span class="k">reward</span>    <span class="v">${g.reward_type||'–'}</span>
-        <span class="k">max_clen</span>  <span class="v">${g.max_completion_length||'–'}</span>
-        <span class="k">n_gen</span>     <span class="v">${g.num_generations||'–'}</span>
-        <span class="k">kl_coeff</span>  <span class="v">${g.kl_coeff||'–'}</span>
+  // SFT curves (only if run has SFT)
+  const sftCharts = !hasSFT ? '' : `
+    <div class="card">
+      <div class="card-title">SFT training curves</div>
+      <div class="chart-grid chart-grid-3">
+        <div class="chart-cell"><div class="chart-label">Loss</div>
+          <canvas id="${cid(id,'sft','loss')}" height="100"></canvas></div>
+        <div class="chart-cell"><div class="chart-label">Token accuracy</div>
+          <canvas id="${cid(id,'sft','acc')}" height="100"></canvas></div>
+        <div class="chart-cell"><div class="chart-label">LR</div>
+          <canvas id="${cid(id,'sft','lr')}" height="100"></canvas></div>
       </div>
     </div>`;
 
-  const gm=grpoCurves.metrics||[];
-  setData('c-reward', pts(gm,'reward'));
-  setData('c-prs',    pts(gm,'rewards/reward_prs/mean'));
-  setData('c-format', pts(gm,'rewards/reward_format/mean'));
-  setData('c-kl',     pts(gm,'kl'));
-  setData('c-lr-grpo',pts(gm,'learning_rate'));
-  setData('c-clen',   pts(gm,'completions/mean_length'));
-  setData('c-clip',   pts(gm,'completions/clipped_ratio'));
-  setData('c-entropy',pts(gm,'entropy'));
+  // RL curves (only if run has RL)
+  const rlCharts = !hasRL ? '' : `
+    <div class="card">
+      <div class="card-title">RL training curves</div>
+      <div class="chart-grid chart-grid-4">
+        <div class="chart-cell"><div class="chart-label">Reward</div>
+          <canvas id="${cid(id,'rl','reward')}" height="100"></canvas></div>
+        <div class="chart-cell"><div class="chart-label">PRS / FAS</div>
+          <canvas id="${cid(id,'rl','prs')}" height="100"></canvas></div>
+        <div class="chart-cell"><div class="chart-label">Format reward</div>
+          <canvas id="${cid(id,'rl','fmt')}" height="100"></canvas></div>
+        <div class="chart-cell"><div class="chart-label">KL</div>
+          <canvas id="${cid(id,'rl','kl')}" height="100"></canvas></div>
+        <div class="chart-cell"><div class="chart-label">LR</div>
+          <canvas id="${cid(id,'rl','lr')}" height="100"></canvas></div>
+        <div class="chart-cell"><div class="chart-label">Completion length</div>
+          <canvas id="${cid(id,'rl','clen')}" height="100"></canvas></div>
+        <div class="chart-cell"><div class="chart-label">Clipped ratio</div>
+          <canvas id="${cid(id,'rl','clip')}" height="100"></canvas></div>
+        <div class="chart-cell"><div class="chart-label">Entropy</div>
+          <canvas id="${cid(id,'rl','entropy')}" height="100"></canvas></div>
+      </div>
+    </div>`;
 
-  const sm=sftCurves.metrics||[];
-  setData('c-sft-loss',pts(sm,'loss'));
-  setData('c-sft-acc', pts(sm,'mean_token_accuracy'));
-  setData('c-sft-lr',  pts(sm,'learning_rate'));
-
-  const allCps=[...(sftCps.checkpoints||[]).map(c=>({...c,_stage:'SFT'})),
-                ...(grpoCps.checkpoints||[]).map(c=>({...c,_stage:'GRPO'}))];
-  renderCheckpoints(document.getElementById('checkpoint-panel'), allCps);
-  renderRollouts(document.getElementById('rollouts-sft'),  'SFT Rollouts',  sftRoll);
-  renderRollouts(document.getElementById('rollouts-grpo'), 'GRPO Rollouts', grpoRoll);
-  sftFail._stage='SFT'; grpoFail._stage='GRPO';
-  renderFailures(document.getElementById('failures-panel'), [sftFail, grpoFail]);
-  renderDataStats(document.getElementById('datastats-panel'), dstats);
-}
-
-// ──────────────────────────────────────────────────────────────────────────────
-// Experiment tab
-// ──────────────────────────────────────────────────────────────────────────────
-let _expCharts = {};   // exp_id → {reward, prs, format, kl, lr, clen, clip, entropy}
-
-function _expChartId(exp_id, name) { return `ec-${exp_id}-${name}`; }
-
-function buildExpLayout(exp_id) {
-  function cid(n) { return _expChartId(exp_id, n); }
-  return `
-  <div class="row row-3">
-    <div class="card" id="exp-summary-${exp_id}"><div class="card-title">RL run</div><div class="none">loading…</div></div>
-    <div class="card" id="exp-config-${exp_id}"><div class="card-title">Config</div><div class="none">loading…</div></div>
-    <div class="card" id="exp-hparam-${exp_id}"><div class="card-title">Hparam search</div><div class="none">loading…</div></div>
-  </div>
-  <div class="card">
-    <div class="card-title">Training Curves</div>
-    <div class="chart-row" style="grid-template-columns:repeat(4,1fr);">
-      <div class="chart-cell"><div class="chart-label">Reward (combined)</div><canvas id="${cid('reward')}" height="100"></canvas></div>
-      <div class="chart-cell"><div class="chart-label">PRS / FAS reward</div><canvas id="${cid('prs')}"    height="100"></canvas></div>
-      <div class="chart-cell"><div class="chart-label">Format reward</div>   <canvas id="${cid('format')}" height="100"></canvas></div>
-      <div class="chart-cell"><div class="chart-label">KL divergence</div>   <canvas id="${cid('kl')}"     height="100"></canvas></div>
-      <div class="chart-cell"><div class="chart-label">Learning rate</div>   <canvas id="${cid('lr')}"     height="100"></canvas></div>
-      <div class="chart-cell"><div class="chart-label">Compl. length</div>   <canvas id="${cid('clen')}"   height="100"></canvas></div>
-      <div class="chart-cell"><div class="chart-label">Clipped ratio</div>   <canvas id="${cid('clip')}"   height="100"></canvas></div>
-      <div class="chart-cell"><div class="chart-label">Entropy</div>         <canvas id="${cid('entropy')}"height="100"></canvas></div>
-    </div>
-  </div>
-  <div class="row row-2">
-    <div class="card" id="exp-rollouts-${exp_id}"><div class="card-title">Rollout Examples</div><div class="none">loading…</div></div>
-    <div class="row" style="display:grid;gap:8px;">
-      <div class="card" id="exp-checkpoints-${exp_id}"><div class="card-title">Checkpoints</div><div class="none">loading…</div></div>
-      <div class="card" id="exp-failures-${exp_id}"><div class="card-title">Failure Cases</div><div class="none">loading…</div></div>
+  return `<div class="view" id="view-${id}" style="display:none">
+    ${topRow}${sftCharts}${rlCharts}
+    <div class="card" id="cp-card-${id}">
+      <div class="card-title">checkpoints</div><span class="dim">loading…</span>
     </div>
   </div>`;
 }
 
-function initExpCharts(exp_id) {
-  function cid(n) { return _expChartId(exp_id, n); }
-  makeChart(cid('reward'), 'reward',     C.reward, {fill:true});
-  makeChart(cid('prs'),    'PRS/FAS',    C.prs,    {ymin:0,ymax:1});
-  makeChart(cid('format'), 'format',     C.format, {ymin:0,ymax:1});
-  makeChart(cid('kl'),     'KL',         C.kl);
-  makeChart(cid('lr'),     'LR',         C.lr);
-  makeChart(cid('clen'),   'compl len',  C.clen);
-  makeChart(cid('clip'),   'clipped',    C.clip,   {ymin:0,ymax:1});
-  makeChart(cid('entropy'),'entropy',    C.entropy);
-}
-
-async function refreshExperiment(exp_id) {
-  const [summary, curves, cps, rollouts, failures, hparam] = await Promise.all([
-    fetchJSON(`/api/experiment/${exp_id}/summary`),
-    fetchJSON(`/api/experiment/${exp_id}/curves`),
-    fetchJSON(`/api/experiment/${exp_id}/checkpoints`),
-    fetchJSON(`/api/experiment/${exp_id}/rollouts`),
-    fetchJSON(`/api/experiment/${exp_id}/failures`),
-    fetchJSON(`/api/experiment/${exp_id}/hparam_search`),
-  ]);
-
-  // Summary card
-  const el = document.getElementById(`exp-summary-${exp_id}`);
-  if (el) el.innerHTML = stageSummaryHtml(summary.name||'RL Run', summary.rl||{});
-
-  // Config card
-  const cfg = summary.config || {};
-  const cfgEl = document.getElementById(`exp-config-${exp_id}`);
-  if (cfgEl) {
-    const pb = cfg.prompt_builder || {};
-    const rl = cfg.rl || {};
-    cfgEl.innerHTML=`<div class="card-title">Config</div>
-      <div class="kv">
-        <span class="k">strategy</span>   <span class="v">${pb.strategy||'–'}</span>
-        <span class="k">finetune</span>   <span class="v">${rl.finetune_mode||'–'}</span>
-        <span class="k">reward</span>     <span class="v">${rl.reward_type||'–'}</span>
-        <span class="k">lr</span>         <span class="v">${rl.learning_rate||'–'}</span>
-        <span class="k">kl_coeff</span>   <span class="v">${rl.kl_coeff||'–'}</span>
-        <span class="k">algo</span>       <span class="v">${rl.algo||'–'}</span>
-      </div>`;
+// Initialize Chart.js instances for a run (called lazily on first tab switch)
+function initRunCharts(run) {
+  if (CHARTS_INIT.has(run.id)) return;
+  CHARTS_INIT.add(run.id);
+  const id = run.id;
+  const hasSFT = run.type === 'sft' || run.type === 'sft_rl';
+  const hasRL  = run.type === 'rl'  || run.type === 'sft_rl';
+  if (hasSFT) {
+    makeChart(cid(id,'sft','loss'), 'loss', C.loss);
+    makeChart(cid(id,'sft','acc'),  'acc',  C.acc,  0, 1);
+    makeChart(cid(id,'sft','lr'),   'LR',   C.lr);
   }
-
-  // Hparam search card
-  const hpEl = document.getElementById(`exp-hparam-${exp_id}`);
-  if (hpEl) {
-    const results = hparam.results || [];
-    const best    = hparam.best;
-    if (!results.length) {
-      hpEl.innerHTML='<div class="card-title">Hparam search</div><div class="none">not yet run</div>';
-    } else {
-      const rows = results.map(r => {
-        const isBest = best && r.lr===best.lr && r.kl===best.kl;
-        return `<tr class="${isBest?'best':''}">
-          <td>${r.lr}</td><td>${r.kl}</td>
-          <td class="${isBest?'hparam-best':''}">${r.mean_reward?.toFixed(4)||'–'}</td>
-          <td>${r.steps}</td>
-        </tr>`;
-      }).join('');
-      hpEl.innerHTML=`<div class="card-title">Hparam search${best?` — best lr=${best.lr} kl=${best.kl}`:''}</div>
-        <table><thead><tr><th>lr</th><th>kl</th><th>mean_reward</th><th>steps</th></tr></thead>
-        <tbody>${rows}</tbody></table>`;
-    }
-  }
-
-  // Training curves
-  function cid(n) { return _expChartId(exp_id, n); }
-  const m = curves.metrics || [];
-  setData(cid('reward'), pts(m,'reward'));
-  setData(cid('prs'),    pts(m,'rewards/reward_prs/mean').length ?
-                          pts(m,'rewards/reward_prs/mean') : pts(m,'rewards/reward_fas/mean'));
-  setData(cid('format'), pts(m,'rewards/reward_format/mean'));
-  setData(cid('kl'),     pts(m,'kl'));
-  setData(cid('lr'),     pts(m,'learning_rate'));
-  setData(cid('clen'),   pts(m,'completions/mean_length'));
-  setData(cid('clip'),   pts(m,'completions/clipped_ratio'));
-  setData(cid('entropy'),pts(m,'entropy'));
-
-  // Checkpoints
-  renderCheckpoints(document.getElementById(`exp-checkpoints-${exp_id}`),
-                    cps.checkpoints||[]);
-
-  // Rollouts
-  renderRollouts(document.getElementById(`exp-rollouts-${exp_id}`),
-                 'Rollout Examples', rollouts);
-
-  // Failures
-  failures._stage='RL';
-  renderFailures(document.getElementById(`exp-failures-${exp_id}`), [failures]);
-}
-
-// ──────────────────────────────────────────────────────────────────────────────
-// Tab management
-// ──────────────────────────────────────────────────────────────────────────────
-let _activeTab   = 'pipeline';
-let _experiments = [];
-
-function switchTab(tabId) {
-  _activeTab = tabId;
-  document.querySelectorAll('.tab').forEach(t => t.classList.toggle('active', t.dataset.tab===tabId));
-  document.getElementById('view-pipeline').style.display    = tabId==='pipeline' ? '' : 'none';
-  document.getElementById('view-experiments').style.display = tabId!=='pipeline' ? '' : 'none';
-  if (tabId !== 'pipeline') {
-    const exp = _experiments.find(e=>e.exp_id===tabId);
-    if (exp) refreshExperiment(tabId);
+  if (hasRL) {
+    makeChart(cid(id,'rl','reward'),  'reward',  C.reward);
+    makeChart(cid(id,'rl','prs'),     'PRS/FAS', C.prs,    0, 1);
+    makeChart(cid(id,'rl','fmt'),     'format',  C.format, 0, 1);
+    makeChart(cid(id,'rl','kl'),      'KL',      C.kl);
+    makeChart(cid(id,'rl','lr'),      'LR',      C.lr);
+    makeChart(cid(id,'rl','clen'),    'length',  C.clen);
+    makeChart(cid(id,'rl','clip'),    'clipped', C.kl,     0, 1);
+    makeChart(cid(id,'rl','entropy'), 'entropy', C.entropy);
   }
 }
 
-async function loadExperimentTabs() {
-  const exps = await fetchJSON('/api/experiments');
-  _experiments = exps || [];
+// ── Tab structure (rebuild when run list changes) ─────────────────────────────
+const tabBar   = document.getElementById('tab-bar');
+const tabMeta  = document.getElementById('tab-meta');
+const viewsDiv = document.getElementById('views');
 
-  // Remove old experiment tabs
-  document.querySelectorAll('.tab.exp-tab').forEach(t=>t.remove());
-  const tabBar = document.getElementById('tab-bar');
-  const meta   = document.getElementById('tab-bar-meta');
+function buildTabStructure(runs) {
+  // Destroy existing charts
+  Object.keys(CHARTS).forEach(id => { CHARTS[id]?.destroy(); delete CHARTS[id]; });
+  CHARTS_INIT.clear();
+  // Remove existing tabs and views
+  document.querySelectorAll('.run-tab').forEach(el => el.remove());
+  viewsDiv.innerHTML = '';
 
-  for (const exp of _experiments) {
-    const t = document.createElement('div');
-    t.className = 'tab exp-tab';
-    t.dataset.tab = exp.exp_id;
-    t.title = exp.exp_id;
-    // Short label: name (strip timestamp suffix)
-    const shortName = exp.name.length > 35 ? exp.name.slice(0,35)+'…' : exp.name;
-    t.textContent = shortName;
-    t.onclick = () => switchTab(exp.exp_id);
-    tabBar.insertBefore(t, meta);
+  for (const run of runs) {
+    const tab = document.createElement('div');
+    tab.className = 'tab run-tab';
+    tab.id = `tab-${run.id}`;
+    tab.dataset.id = run.id;
+    tab.title = run.id;  // full ID as tooltip
+    tab.textContent = run.label;
+    tab.onclick = () => switchTab(run.id);
+    tabBar.insertBefore(tab, tabMeta);
+
+    viewsDiv.insertAdjacentHTML('beforeend', buildRunViewHTML(run));
   }
+}
 
-  // Build per-experiment DOM stubs in view-experiments
-  const container = document.getElementById('exp-main');
-  for (const exp of _experiments) {
-    if (!document.getElementById(`exp-summary-${exp.exp_id}`)) {
-      const wrapper = document.createElement('div');
-      wrapper.id = `exp-wrapper-${exp.exp_id}`;
-      wrapper.innerHTML = buildExpLayout(exp.exp_id);
-      container.appendChild(wrapper);
-      initExpCharts(exp.exp_id);
+// ── Summary updates (in-place, no DOM rebuild) ────────────────────────────────
+function updateSummaries(runs) {
+  for (const run of runs) {
+    const id = run.id;
+    const hasSFT = run.type === 'sft' || run.type === 'sft_rl';
+    const hasRL  = run.type === 'rl'  || run.type === 'sft_rl';
+
+    const sftEl = document.getElementById(`sft-card-${id}`);
+    if (sftEl) sftEl.innerHTML = stageCardHTML('SFT', run.sft);
+
+    const rlEl = document.getElementById(`rl-card-${id}`);
+    if (rlEl) rlEl.innerHTML = stageCardHTML('RL', run.rl);
+
+    const cfgEl = document.getElementById(`cfg-card-${id}`);
+    if (cfgEl) cfgEl.innerHTML = configCardHTML(run);
+
+    const hpEl = document.getElementById(`hp-card-${id}`);
+    if (hpEl) hpEl.innerHTML = hparamCardHTML(run.hparam_search);
+
+    // Checkpoints come from whichever stage exists
+    const cpEl = document.getElementById(`cp-card-${id}`);
+    if (cpEl) {
+      const cps = hasRL ? (run.rl?.checkpoints ?? []) : (run.sft?.checkpoints ?? []);
+      cpEl.innerHTML = checkpointsCardHTML(cps);
     }
   }
 }
 
-// ──────────────────────────────────────────────────────────────────────────────
-// Main refresh
-// ──────────────────────────────────────────────────────────────────────────────
+// ── Tab switching + curve loading ─────────────────────────────────────────────
+function switchTab(runId) {
+  _activeId = runId;
+  document.querySelectorAll('.run-tab').forEach(t =>
+    t.classList.toggle('active', t.dataset.id === runId));
+  document.querySelectorAll('.view').forEach(v =>
+    v.style.display = v.id === `view-${runId}` ? '' : 'none');
+
+  const run = _runs.find(r => r.id === runId);
+  if (run) {
+    initRunCharts(run);  // no-op if already initialized
+    loadCurves(run);
+  }
+}
+
+async function loadCurves(run) {
+  const id = run.id;
+  const hasSFT = run.type === 'sft' || run.type === 'sft_rl';
+  const hasRL  = run.type === 'rl'  || run.type === 'sft_rl';
+
+  const curves = await fetchJSON(`/api/runs/${id}/curves`);
+
+  if (hasSFT) {
+    const sm = curves.sft || [];
+    setData(cid(id,'sft','loss'), pts(sm, 'loss'));
+    setData(cid(id,'sft','acc'),  pts(sm, 'mean_token_accuracy'));
+    setData(cid(id,'sft','lr'),   pts(sm, 'learning_rate'));
+  }
+  if (hasRL) {
+    const rm = curves.rl || [];
+    // Use PRS key if available, fall back to FAS
+    const prsKey = rm.some(m => m['rewards/reward_prs/mean'] != null)
+      ? 'rewards/reward_prs/mean' : 'rewards/reward_fas/mean';
+    setData(cid(id,'rl','reward'),  pts(rm, 'reward'));
+    setData(cid(id,'rl','prs'),     pts(rm, prsKey));
+    setData(cid(id,'rl','fmt'),     pts(rm, 'rewards/reward_format/mean'));
+    setData(cid(id,'rl','kl'),      pts(rm, 'kl'));
+    setData(cid(id,'rl','lr'),      pts(rm, 'learning_rate'));
+    setData(cid(id,'rl','clen'),    pts(rm, 'completions/mean_length'));
+    setData(cid(id,'rl','clip'),    pts(rm, 'completions/clipped_ratio'));
+    setData(cid(id,'rl','entropy'), pts(rm, 'entropy'));
+  }
+}
+
+// ── Main refresh ──────────────────────────────────────────────────────────────
 async function fetchJSON(url) {
   const r = await fetch(url);
-  return r.json();
+  if (!r.ok) throw new Error(`${url} → HTTP ${r.status}`);
+  const text = await r.text();
+  try { return JSON.parse(text); }
+  catch (e) { throw new Error(`${url} returned non-JSON (got: ${text.slice(0, 60)}…)`); }
 }
 
-async function refreshAll() {
-  document.getElementById('last-refresh').textContent = 'refreshing…';
-  await loadExperimentTabs();
-  if (_activeTab === 'pipeline') {
-    await refreshPipeline();
-  } else {
-    await refreshExperiment(_activeTab);
+async function fullRefresh() {
+  document.getElementById('clock').textContent = 'refreshing…';
+  document.getElementById('refresh-btn').disabled = true;
+  try {
+    const newRuns = await fetchJSON('/api/runs');
+    if (!newRuns?.length) {
+      viewsDiv.innerHTML = '<div style="padding:24px;color:var(--dim)">No runs found in runs/</div>';
+      return;
+    }
+    const oldIds = _runs.map(r => r.id).join(',');
+    const newIds = newRuns.map(r => r.id).join(',');
+    if (oldIds !== newIds) {
+      buildTabStructure(newRuns);
+    }
+    _runs = newRuns;
+    updateSummaries(_runs);
+
+    // Activate the previously active run (or the last one in the list)
+    const toActivate = _runs.find(r => r.id === _activeId) ? _activeId : _runs[_runs.length - 1].id;
+    switchTab(toActivate);
+    document.getElementById('clock').textContent = new Date().toLocaleTimeString();
+  } catch (err) {
+    document.getElementById('clock').textContent = 'error: ' + err.message;
   }
-  document.getElementById('last-refresh').textContent =
-    'last refresh: ' + new Date().toLocaleTimeString();
+  document.getElementById('refresh-btn').disabled = false;
 }
 
-// ── Boot ──────────────────────────────────────────────────────────────────────
-initPipelineCharts();
-refreshAll();
-setInterval(refreshAll, 30000);
+// Initial load + periodic refresh
+fullRefresh();
+setInterval(async () => {
+  try {
+    const newRuns = await fetchJSON('/api/runs');
+    if (!newRuns?.length) return;
+    const oldIds = _runs.map(r => r.id).join(',');
+    const newIds = newRuns.map(r => r.id).join(',');
+    if (oldIds !== newIds) buildTabStructure(newRuns);
+    _runs = newRuns;
+    updateSummaries(_runs);
+    const run = _runs.find(r => r.id === _activeId);
+    if (run) loadCurves(run);
+    document.getElementById('clock').textContent = new Date().toLocaleTimeString();
+  } catch (_) { /* silent */ }
+}, 30000);
 </script>
 </body>
 </html>
